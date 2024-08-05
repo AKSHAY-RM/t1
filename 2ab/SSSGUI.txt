@@ -1,0 +1,213 @@
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QMainWindow>
+#include <QUdpSocket>
+#include <QTimer>
+#include "protocol.h"
+
+QT_BEGIN_NAMESPACE
+namespace Ui {
+class MainWindow;
+}
+QT_END_NAMESPACE
+
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    MainWindow(QWidget *parent = nullptr);
+    ~MainWindow();
+
+private slots:
+    void on_pbBrowse_clicked();
+    void sendAliveCommand();
+    void processPendingDatagrams();
+    void updateLabelStatus();
+
+private:
+    Ui::MainWindow *ui;
+    QUdpSocket *udpSocket;
+    QTimer *responseTimer;
+    uint32_t messageCount;
+    void updateLabel(QLabel *label, bool success);
+};
+#endif // MAINWINDOW_H
+------------------------------------------------------
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#pragma pack(push, 1)  // Ensure the structures are packed
+
+struct AliveCommand {
+    uint32_t messageId;    // Message Identifier (0x1234)
+    uint32_t messageCount; // Incremental message count
+    uint16_t commandId;    // Command ID for ALIVE (1001)
+    uint8_t spare2;        // Filled with zeros
+    uint8_t spare3;        // Filled with zeros
+};
+
+struct AliveResponse {
+    uint32_t messageId;           // Message Identifier (0x5678)
+    uint32_t messageCount;        // Incremental message count
+    uint16_t commandId;           // Command ID for ALIVE (1001)
+    uint8_t acknowledgementType;  // 0 - No info, 1 - Positive ACK, 2 - Negative ACK
+    uint8_t reasonForFailureCode; // Filled with zeros
+};
+
+#pragma pack(pop)  // Reset packing to default
+#endif // PROTOCOL_H
+--------------------------------------------------
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include <QDir>
+#include <QFileDialog>
+#include <QHostAddress>
+#include <QByteArray>
+#include <cstring>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+    ,udpSocket(new QUdpSocket(this))
+    ,responseTimer(new QTimer(this)),
+    messageCount(0)
+{
+    ui->setupUi(this);
+    connect(ui->pbBrowse, &QPushButton::pressed, this, &MainWindow::on_pbBrowse_clicked);
+    connect(ui->tbALIVE, &QToolButton::clicked, this, &MainWindow::sendAliveCommand);
+    connect(udpSocket, &QUdpSocket::readyRead, this, &MainWindow::processPendingDatagrams);
+    connect(responseTimer, &QTimer::timeout, this, &MainWindow::updateLabelStatus);
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+void MainWindow::on_pbBrowse_clicked()
+{
+    QString directory = QDir::toNativeSeparators(QFileDialog::getExistingDirectory(this, tr("Find File"), QDir::currentPath()));
+    ui->leFILE_READ->setText(directory);
+}
+
+void MainWindow::sendAliveCommand() {
+    AliveCommand command;
+    command.messageId = 0x1234;
+    command.messageCount = ++messageCount;
+    command.commandId = 1001;
+    command.spare2 = 0;
+    command.spare3 = 0;
+
+    QByteArray datagram(reinterpret_cast<const char*>(&command), sizeof(command));
+    udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 1234);
+    responseTimer->start(1500);  // Wait for 1.5 seconds for a response
+}
+
+void MainWindow::processPendingDatagrams() {
+    while (udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(udpSocket->pendingDatagramSize());
+        udpSocket->readDatagram(datagram.data(), datagram.size());
+
+        if (datagram.size() == sizeof(AliveResponse)) {
+            AliveResponse response;
+            std::memcpy(&response, datagram.data(), sizeof(response));
+
+            if (response.commandId == 1001) {
+                bool success = (response.acknowledgementType == 1);
+                updateLabel(ui->lblALIVE, success);
+            }
+        }
+    }
+}
+
+void MainWindow::updateLabelStatus() {
+    // If no response received, set label to red
+    responseTimer->stop();
+    updateLabel(ui->lblAlive, false);
+}
+
+void MainWindow::updateLabel(QLabel *label, bool success) {
+    if (success) {
+        label->setStyleSheet("background-color: green;");
+    } else {
+        label->setStyleSheet("background-color: red;");
+    }
+}
+-------------------------------------------------------------------------------
+#ifndef SERVER_H
+#define SERVER_H
+#include <QObject>
+#include <QUdpSocket>
+#include "protocol.h"  // Include the protocol header
+
+class Server : public QObject {
+    Q_OBJECT
+
+public:
+    explicit Server(QObject *parent = nullptr);
+
+private slots:
+    void processPendingDatagrams();
+
+private:
+    QUdpSocket *udpSocket;
+};
+
+#endif // SERVER_H
+----------------------------------------------------------
+#include "server.h"
+#include <QCoreApplication>
+#include <QHostAddress>
+#include <QByteArray>
+#include <cstring>
+#include <iostream>
+
+Server::Server(QObject *parent) :
+    QObject(parent),
+    udpSocket(new QUdpSocket(this)) {
+    if (!udpSocket->bind(QHostAddress::LocalHost, 1234)) {
+        std::cerr << "Failed to bind UDP socket!" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    connect(udpSocket, &QUdpSocket::readyRead, this, &Server::processPendingDatagrams);
+    std::cout << "Server is running and waiting for messages..." << std::endl;
+}
+
+void Server::processPendingDatagrams() {
+    while (udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(udpSocket->pendingDatagramSize());
+        udpSocket->readDatagram(datagram.data(), datagram.size());
+
+        if (datagram.size() == sizeof(AliveCommand)) {
+            AliveCommand command;
+            std::memcpy(&command, datagram.data(), sizeof(command));
+
+            if (command.commandId == 1001) {
+                std::cout << "Received ALIVE command from client" << std::endl;
+
+                AliveResponse response;
+                response.messageId = 0x5678;
+                response.messageCount = command.messageCount;
+                response.commandId = 1001;
+                response.acknowledgementType = 1;  // Positive ACK
+                response.reasonForFailureCode = 0;
+
+                QByteArray responseDatagram(reinterpret_cast<const char*>(&response), sizeof(response));
+                udpSocket->writeDatagram(responseDatagram, QHostAddress::LocalHost, 1234);
+                std::cout << "Sent ALIVE_ACK response to client" << std::endl;
+            }
+        }
+    }
+}
+
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+    Server server;
+    return a.exec();
+}
+---------------------------------------------------------------
