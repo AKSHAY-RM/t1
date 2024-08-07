@@ -1,0 +1,791 @@
+
+
+
+Cancel
+
+Send
+ChatGPT
+To extend the existing server-client communication system to include a new CONFIG command and its corresponding acknowledgment (CONFIG_ACK), we need to follow these steps:
+
+Update Protocol Structures: Add a new structure for the CONFIG command and its acknowledgment.
+Implement CONFIG Command Handling in the Server.
+Implement the CONFIG Command Sending in the Client.
+Implement CONFIG_ACK Response Handling in the Client.
+1. Update Protocol Structures
+Update the protocol.h file to include the CONFIG command and its acknowledgment.
+
+cpp
+Copy code
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#pragma pack(push, 1)  // Ensure the structures are packed
+
+struct RequestCommand {
+    uint32_t messageId;    // Message Identifier (0x1234)
+    uint32_t messageCount; // Incremental message count
+    uint16_t commandId;    // Command ID for ALIVE (1001)
+    uint8_t spare2;        // Filled with zeros
+    uint8_t spare3;        // Filled with zeros
+};
+
+struct ResponseCommand {
+    uint32_t messageId;           // Message Identifier (0x5678)
+    uint32_t messageCount;        // Incremental message count
+    uint16_t commandId;           // Command ID for ALIVE (1001)
+    uint8_t acknowledgementType;  // 0 - No info, 1 - Positive ACK, 2 - Negative ACK
+    uint8_t reasonForFailureCode; // Filled with zeros
+};
+
+struct ConfigCommand {
+    uint32_t messageId;    // Message Identifier (0x4321)
+    uint32_t messageCount; // Incremental message count
+    uint16_t commandId;    // Command ID for CONFIG (1002)
+    uint8_t configData[10]; // Configuration data
+};
+
+struct ConfigAckCommand {
+    uint32_t messageId;           // Message Identifier (0x8765)
+    uint32_t messageCount;        // Incremental message count
+    uint16_t commandId;           // Command ID for CONFIG_ACK (1002)
+    uint8_t acknowledgementType;  // 0 - No info, 1 - Positive ACK, 2 - Negative ACK
+    uint8_t reasonForFailureCode; // Reason for failure
+};
+
+#pragma pack(pop)  // Reset packing to default
+#endif // PROTOCOL_H
+2. Implement CONFIG Command Handling in the Server
+Update the server.cpp file to handle the CONFIG command and send back the CONFIG_ACK.
+
+cpp
+Copy code
+void Server::v_acknowledgementToAliveCommand() {
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_udpSocket->pendingDatagramSize());
+        m_udpSocket->readDatagram(datagram.data(), datagram.size());
+
+        std::cout << "Received datagram of size:" << datagram.size() << std::endl;
+
+        if (datagram.size() == sizeof(RequestCommand)) {
+            RequestCommand command;
+            std::memcpy(&command, datagram.data(), sizeof(command));
+
+            if (command.commandId == 1001) {
+                std::cout << "Received ALIVE command from client:" << std::endl;
+                std::cout << "messageId:" << command.messageId << std::endl;
+                std::cout << "messageCount:" << command.messageCount << std::endl;
+                std::cout << "commandId:" << command.commandId << std::endl;
+
+                ResponseCommand response;
+                response.messageId = 0x5678;
+                response.messageCount = command.messageCount;
+                response.commandId = 1001;
+                response.acknowledgementType = 1;  // Positive ACK
+                response.reasonForFailureCode = 0;
+
+                QByteArray responseDatagram(reinterpret_cast<const char*>(&response), sizeof(response));
+                m_udpSocket->writeDatagram(responseDatagram, QHostAddress::LocalHost, 5678);
+                std::cout << "Sent ALIVE_ACK response to client:" << std::endl;
+
+            } else {
+                std::cout << "Received command with unexpected commandId:" << command.commandId << std::endl;
+            }
+
+        } else if (datagram.size() == sizeof(ConfigCommand)) {
+            ConfigCommand configCommand;
+            std::memcpy(&configCommand, datagram.data(), sizeof(configCommand));
+
+            if (configCommand.commandId == 1002) {
+                std::cout << "Received CONFIG command from client:" << std::endl;
+                std::cout << "messageId:" << configCommand.messageId << std::endl;
+                std::cout << "messageCount:" << configCommand.messageCount << std::endl;
+                std::cout << "commandId:" << configCommand.commandId << std::endl;
+
+                ConfigAckCommand configAck;
+                configAck.messageId = 0x8765;
+                configAck.messageCount = configCommand.messageCount;
+                configAck.commandId = 1002;
+                configAck.acknowledgementType = 1;  // Positive ACK
+                configAck.reasonForFailureCode = 0;
+
+                QByteArray responseDatagram(reinterpret_cast<const char*>(&configAck), sizeof(configAck));
+                m_udpSocket->writeDatagram(responseDatagram, QHostAddress::LocalHost, 5678);
+                std::cout << "Sent CONFIG_ACK response to client:" << std::endl;
+            } else {
+                std::cout << "Received command with unexpected commandId:" << configCommand.commandId << std::endl;
+            }
+
+        } else {
+            std::cout << "Received datagram of unexpected size:" << datagram.size() << std::endl;
+        }
+    }
+}
+3. Implement the CONFIG Command Sending in the Client
+Update the mainwindow.cpp file to send the CONFIG command when a button is clicked.
+
+cpp
+Copy code
+void MainWindow::v_sendConfigCommand() {
+    ConfigCommand configCommand;
+    configCommand.messageId = 0x4321;
+    configCommand.messageCount = ++m_messageCount;
+    configCommand.commandId = 1002;
+    std::memset(configCommand.configData, 0, sizeof(configCommand.configData));
+
+    QByteArray datagram(reinterpret_cast<const char*>(&configCommand), sizeof(configCommand));
+    m_udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 1234);
+    m_responseTimer->start(1500);  // Wait for 1.5 seconds for a response
+}
+
+void MainWindow::v_responseToConfigCommand() {
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_udpSocket->pendingDatagramSize());
+        m_udpSocket->readDatagram(datagram.data(), datagram.size());
+
+        if (datagram.size() == sizeof(ConfigAckCommand)) {
+            ConfigAckCommand configAck;
+            std::memcpy(&configAck, datagram.data(), sizeof(configAck));
+
+            if (configAck.commandId == 1002) {
+                bool success = (configAck.acknowledgementType == 1);
+                v_updateLabel(ui->lbl_CONFIG, success);
+            }
+        }
+    }
+}
+
+void MainWindow::v_updateLabel(QLabel *label, bool success) {
+    if (success) {
+        label->setStyleSheet("background-color: green;");
+    } else {
+        label->setStyleSheet("background-color: red;");
+    }
+}
+4. Update mainwindow.h to include new function declarations
+cpp
+Copy code
+class MainWindow : public QMainWindow {
+    Q_OBJECT
+
+public:
+    explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow();
+
+private slots:
+    void v_on_pbBrowse_clicked();
+    void v_sendAliveCommand();
+    void v_responseToAliveCommand();
+    void v_sendConfigCommand();
+    void v_responseToConfigCommand();
+
+private:
+    void v_updateLabel(QLabel *label, bool success);
+
+    Ui::MainWindow *ui;
+    QUdpSocket *m_udpSocket;
+    QTimer *m_responseTimer;
+    uint32_t m_messageCount;
+};
+5. Connect the new slots to UI elements
+Update the MainWindow constructor in mainwindow.cpp:
+
+cpp
+Copy code
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+    m_udpSocket = new QUdpSocket();
+    m_responseTimer = new QTimer();
+    m_messageCount = 0;
+    m_responseTimer->setInterval(1500);
+    connect(ui->pb_Browse, &QPushButton::pressed, this, &MainWindow::v_on_pbBrowse_clicked);
+    connect(ui->tb_ALIVE, &QToolButton::clicked, this, &MainWindow::v_sendAliveCommand);
+    connect(ui->tb_CONFIG, &QToolButton::clicked, this, &MainWindow::v_sendConfigCommand); // Connect CONFIG button
+    if (!m_udpSocket->bind(QHostAddress::LocalHost, 5678)) {
+        std::cerr << "FAILED TO BIND UDP SOCKET" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    connect(m_udpSocket, &QUdpSocket::readyRead, this, &MainWindow::v_responseToAliveCommand);
+    connect(m_udpSocket, &QUdpSocket::readyRead, this, &MainWindow::v_responseToConfigCommand); // Connect response handler
+}
+This should ensure that the client can send a CONFIG command to the server, and the server can acknowledge it correctly. The client will then update its UI based on the acknowledgment received.
+
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#pragma pack(push, 1)  // Ensure the structures are packed
+
+struct RequestCommand {
+    uint32_t messageId;    // Message Identifier (0x1234)
+    uint32_t messageCount; // Incremental message count
+    uint16_t commandId;    // Command ID for ALIVE (1001)
+    uint8_t spare2;        // Filled with zeros
+    uint8_t spare3;        // Filled with zeros
+};
+
+struct ResponseCommand {
+    uint32_t messageId;           // Message Identifier (0x5678)
+    uint32_t messageCount;        // Incremental message count
+    uint16_t commandId;           // Command ID for ALIVE (1001)
+    uint8_t acknowledgementType;  // 0 - No info, 1 - Positive ACK, 2 - Negative ACK
+    uint8_t reasonForFailureCode; // Filled with zeros
+};
+
+#pragma pack(pop)  // Reset packing to default
+#endif // PROTOCOL_H
+#include "server.h"
+#include <QCoreApplication>
+#include <QHostAddress>
+#include <QByteArray>
+#include<iostream>
+#include <cstring>
+#include <QDebug> // For debugging output
+
+Server::Server(QObject *parent) :
+    QObject(parent)
+    {
+    m_udpSocket=new QUdpSocket();
+    if (!m_udpSocket->bind(QHostAddress::LocalHost, 1234)) { // Ensure the port matches the client's sending port
+        std::cerr<<"FAILED TO BIND UDP SOCKET"<< std::endl;
+        exit(EXIT_FAILURE);
+    }
+    connect(m_udpSocket, &QUdpSocket::readyRead, this, &Server::v_acknowledgementToAliveCommand);
+    std::cout << "Server is running and waiting for messages..."<< std::endl;
+}
+
+void Server::v_acknowledgementToAliveCommand() {
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_udpSocket->pendingDatagramSize());
+        m_udpSocket->readDatagram(datagram.data(), datagram.size());
+
+       std::cout << "Received datagram of size:" << datagram.size()<< std::endl;
+
+
+        if (datagram.size() == sizeof(RequestCommand)) {
+           RequestCommand command;
+            std::memcpy(&command, datagram.data(), sizeof(command));
+
+            if (command.commandId == 1001) {
+                std::cout << "Received ALIVE command from client:"<< std::endl;
+                std::cout << "messageId:" << command.messageId << std::endl;
+                std::cout << "messageCount:" << command.messageCount<< std::endl;
+                std::cout << "commandId:" << command.commandId << std::endl;
+
+
+                ResponseCommand response;
+                response.messageId = 0x5678;
+                response.messageCount = command.messageCount;
+                response.commandId = 1001;
+                response.acknowledgementType = 1;  // Positive ACK
+                response.reasonForFailureCode = 0;
+
+                QByteArray responseDatagram(reinterpret_cast<const char*>(&response), sizeof(response));
+                m_udpSocket->writeDatagram(responseDatagram, QHostAddress::LocalHost, 5678); // Ensure it sends back to the correct port
+                std::cout << "Sent ALIVE_ACK response to client:"<< std::endl;
+
+            } else {
+                std::cout << "Received command with unexpected commandId:" << command.commandId << std::endl;
+            }
+
+        } else {
+            std::cout << "Received datagram of unexpected size:" << datagram.size()<< std::endl;
+        }
+    }
+}
+
+
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+    Server server;
+    return a.exec();
+}
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include <QDir>
+#include <QFileDialog>
+#include <QHostAddress>
+#include <QByteArray>
+#include<iostream>
+#include <cstring>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+    m_udpSocket = new QUdpSocket();
+    m_responseTimer = new QTimer();
+    m_messageCount=0;
+    m_responseTimer->setInterval(1500);
+    connect(ui->pb_Browse, &QPushButton::pressed, this, &MainWindow::v_on_pbBrowse_clicked);
+    connect(ui->tb_ALIVE, &QToolButton::clicked, this, &MainWindow::v_sendAliveCommand);
+    if (!m_udpSocket->bind(QHostAddress::LocalHost, 5678)) {
+        std::cerr<<"FAILED TO BIND UDP SOCKET"<< std::endl;
+        exit(EXIT_FAILURE);
+    }
+    connect(m_udpSocket, &QUdpSocket::readyRead, this, &MainWindow::v_responseToAliveCommand);
+
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+void MainWindow::v_on_pbBrowse_clicked()
+{
+    QString directory = QDir::toNativeSeparators(QFileDialog::getExistingDirectory(this, tr("Find File"), QDir::currentPath()));
+    ui->le_FILE_READ->setText(directory);
+}
+
+void MainWindow::v_sendAliveCommand() {
+    RequestCommand command;
+    command.messageId = 0x1234;
+    command.messageCount = ++m_messageCount;
+    command.commandId = 1001;
+    command.spare2 = 0;
+    command.spare3 = 0;
+
+    QByteArray datagram(reinterpret_cast<const char*>(&command), sizeof(command));
+    m_udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 1234);
+    m_responseTimer->start(1500);  // Wait for 1.5 seconds for a response
+}
+
+void MainWindow::v_responseToAliveCommand() {
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_udpSocket->pendingDatagramSize());
+        m_udpSocket->readDatagram(datagram.data(), datagram.size());
+
+        if (datagram.size() == sizeof(ResponseCommand)) {
+            ResponseCommand response;
+            std::memcpy(&response, datagram.data(), sizeof(response));
+
+            if (response.commandId == 1001) {
+                bool success = (response.acknowledgementType == 1);
+                v_updateLabel(ui->lbl_ALIVE, success);
+            }
+        }
+    }
+}
+
+
+void MainWindow::v_updateLabel(QLabel *label, bool success) {
+    if (success) {
+        label->setStyleSheet("background-color: green;");
+    } else {
+        label->setStyleSheet("background-color: red;");
+    }
+}
+FILE READ: Command sent by CLIENT to server along with the contents of file to be programmed.
+
+6. FILE READ ACK: Acknowledgement to FILE READ to indicate file has been read by server.
+
+commandID is 1003
+code simmiraly write proper functions 
+ChatGPT
+To implement the FILE READ command and its acknowledgment (FILE READ ACK), we need to follow similar steps as before. Here's how to extend the current implementation:
+
+Update Protocol Structures: Add new structures for the FILE READ command and its acknowledgment.
+Implement FILE READ Command Handling in the Server.
+Implement the FILE READ Command Sending in the Client.
+Implement FILE READ ACK Response Handling in the Client.
+1. Update Protocol Structures
+Update the protocol.h file to include the FILE READ command and its acknowledgment.
+
+cpp
+Copy code
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#pragma pack(push, 1)  // Ensure the structures are packed
+
+struct RequestCommand {
+    uint32_t messageId;    // Message Identifier (0x1234)
+    uint32_t messageCount; // Incremental message count
+    uint16_t commandId;    // Command ID for ALIVE (1001)
+    uint8_t spare2;        // Filled with zeros
+    uint8_t spare3;        // Filled with zeros
+};
+
+struct ResponseCommand {
+    uint32_t messageId;           // Message Identifier (0x5678)
+    uint32_t messageCount;        // Incremental message count
+    uint16_t commandId;           // Command ID for ALIVE (1001)
+    uint8_t acknowledgementType;  // 0 - No info, 1 - Positive ACK, 2 - Negative ACK
+    uint8_t reasonForFailureCode; // Filled with zeros
+};
+
+struct FileReadCommand {
+    uint32_t messageId;    // Message Identifier (0x9101)
+    uint32_t messageCount; // Incremental message count
+    uint16_t commandId;    // Command ID for FILE READ (1003)
+    uint8_t fileData[256]; // Data read from the file
+};
+
+struct FileReadAckCommand {
+    uint32_t messageId;           // Message Identifier (0x1213)
+    uint32_t messageCount;        // Incremental message count
+    uint16_t commandId;           // Command ID for FILE READ ACK (1003)
+    uint8_t acknowledgementType;  // 0 - No info, 1 - Positive ACK, 2 - Negative ACK
+    uint8_t reasonForFailureCode; // Reason for failure
+};
+
+#pragma pack(pop)  // Reset packing to default
+#endif // PROTOCOL_H
+2. Implement FILE READ Command Handling in the Server
+Update the server.cpp file to handle the FILE READ command and send back the FILE READ ACK.
+
+cpp
+Copy code
+void Server::v_acknowledgementToAliveCommand() {
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_udpSocket->pendingDatagramSize());
+        m_udpSocket->readDatagram(datagram.data(), datagram.size());
+
+        std::cout << "Received datagram of size:" << datagram.size() << std::endl;
+
+        if (datagram.size() == sizeof(RequestCommand)) {
+            RequestCommand command;
+            std::memcpy(&command, datagram.data(), sizeof(command));
+
+            if (command.commandId == 1001) {
+                std::cout << "Received ALIVE command from client:" << std::endl;
+                std::cout << "messageId:" << command.messageId << std::endl;
+                std::cout << "messageCount:" << command.messageCount << std::endl;
+                std::cout << "commandId:" << command.commandId << std::endl;
+
+                ResponseCommand response;
+                response.messageId = 0x5678;
+                response.messageCount = command.messageCount;
+                response.commandId = 1001;
+                response.acknowledgementType = 1;  // Positive ACK
+                response.reasonForFailureCode = 0;
+
+                QByteArray responseDatagram(reinterpret_cast<const char*>(&response), sizeof(response));
+                m_udpSocket->writeDatagram(responseDatagram, QHostAddress::LocalHost, 5678);
+                std::cout << "Sent ALIVE_ACK response to client:" << std::endl;
+
+            } else {
+                std::cout << "Received command with unexpected commandId:" << command.commandId << std::endl;
+            }
+
+        } else if (datagram.size() == sizeof(FileReadCommand)) {
+            FileReadCommand fileReadCommand;
+            std::memcpy(&fileReadCommand, datagram.data(), sizeof(fileReadCommand));
+
+            if (fileReadCommand.commandId == 1003) {
+                std::cout << "Received FILE READ command from client:" << std::endl;
+                std::cout << "messageId:" << fileReadCommand.messageId << std::endl;
+                std::cout << "messageCount:" << fileReadCommand.messageCount << std::endl;
+                std::cout << "commandId:" << fileReadCommand.commandId << std::endl;
+
+                // Process the file data (not implemented in this example)
+
+                FileReadAckCommand fileReadAck;
+                fileReadAck.messageId = 0x1213;
+                fileReadAck.messageCount = fileReadCommand.messageCount;
+                fileReadAck.commandId = 1003;
+                fileReadAck.acknowledgementType = 1;  // Positive ACK
+                fileReadAck.reasonForFailureCode = 0;
+
+                QByteArray responseDatagram(reinterpret_cast<const char*>(&fileReadAck), sizeof(fileReadAck));
+                m_udpSocket->writeDatagram(responseDatagram, QHostAddress::LocalHost, 5678);
+                std::cout << "Sent FILE READ ACK response to client:" << std::endl;
+            } else {
+                std::cout << "Received command with unexpected commandId:" << fileReadCommand.commandId << std::endl;
+            }
+
+        } else {
+            std::cout << "Received datagram of unexpected size:" << datagram.size() << std::endl;
+        }
+    }
+}
+3. Implement the FILE READ Command Sending in the Client
+Update the mainwindow.cpp file to send the FILE READ command when a button is clicked.
+
+cpp
+Copy code
+void MainWindow::v_sendFileReadCommand() {
+    FileReadCommand fileReadCommand;
+    fileReadCommand.messageId = 0x9101;
+    fileReadCommand.messageCount = ++m_messageCount;
+    fileReadCommand.commandId = 1003;
+
+    // Read file data (not implemented in this example)
+    std::memset(fileReadCommand.fileData, 0, sizeof(fileReadCommand.fileData));
+
+    QByteArray datagram(reinterpret_cast<const char*>(&fileReadCommand), sizeof(fileReadCommand));
+    m_udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 1234);
+    m_responseTimer->start(1500);  // Wait for 1.5 seconds for a response
+}
+
+void MainWindow::v_responseToFileReadCommand() {
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_udpSocket->pendingDatagramSize());
+        m_udpSocket->readDatagram(datagram.data(), datagram.size());
+
+        if (datagram.size() == sizeof(FileReadAckCommand)) {
+            FileReadAckCommand fileReadAck;
+            std::memcpy(&fileReadAck, datagram.data(), sizeof(fileReadAck));
+
+            if (fileReadAck.commandId == 1003) {
+                bool success = (fileReadAck.acknowledgementType == 1);
+                v_updateLabel(ui->lbl_FILE_READ, success);
+            }
+        }
+    }
+}
+
+void MainWindow::v_updateLabel(QLabel *label, bool success) {
+    if (success) {
+        label->setStyleSheet("background-color: green;");
+    } else {
+        label->setStyleSheet("background-color: red;");
+    }
+}
+4. Update mainwindow.h to include new function declarations
+cpp
+Copy code
+class MainWindow : public QMainWindow {
+    Q_OBJECT
+
+public:
+    explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow();
+
+private slots:
+    void v_on_pbBrowse_clicked();
+    void v_sendAliveCommand();
+    void v_responseToAliveCommand();
+    void v_sendFileReadCommand();
+    void v_responseToFileReadCommand();
+
+private:
+    void v_updateLabel(QLabel *label, bool success);
+
+    Ui::MainWindow *ui;
+    QUdpSocket *m_udpSocket;
+    QTimer *m_responseTimer;
+    uint32_t m_messageCount;
+};
+5. Connect the new slots to UI elements
+Update the MainWindow constructor in mainwindow.cpp:
+
+cpp
+Copy code
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+    m_udpSocket = new QUdpSocket();
+    m_responseTimer = new QTimer();
+    m_messageCount = 0;
+    m_responseTimer->setInterval(1500);
+    connect(ui->pb_Browse, &QPushButton::pressed, this, &MainWindow::v_on_pbBrowse_clicked);
+    connect(ui->tb_ALIVE, &QToolButton::clicked, this, &MainWindow::v_sendAliveCommand);
+    connect(ui->tb_FILE_READ, &QToolButton::clicked, this, &MainWindow::v_sendFileReadCommand); // Connect FILE READ button
+    if (!m_udpSocket->bind(QHostAddress::LocalHost, 5678)) {
+        std::cerr << "FAILED TO BIND UDP SOCKET" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    connect(m_udpSocket, &QUdpSocket::readyRead,
+Note dont create structure again use requestcommand and responsecommand struct 
+ChatGPT
+To implement the FILE READ command and its acknowledgment using the existing RequestCommand and ResponseCommand structures, you need to reuse these structures and identify the command type using the commandId field. Here's how you can do it:
+
+Update the Protocol to Define Command IDs.
+Implement FILE READ Command Handling in the Server.
+Implement the FILE READ Command Sending in the Client.
+Implement FILE READ ACK Response Handling in the Client.
+1. Update the Protocol to Define Command IDs
+Ensure the protocol.h file includes the FILE READ command ID.
+
+cpp
+Copy code
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#pragma pack(push, 1)  // Ensure the structures are packed
+
+struct RequestCommand {
+    uint32_t messageId;    // Message Identifier
+    uint32_t messageCount; // Incremental message count
+    uint16_t commandId;    // Command ID
+    uint8_t data[256];     // Data field for different commands
+};
+
+struct ResponseCommand {
+    uint32_t messageId;           // Message Identifier
+    uint32_t messageCount;        // Incremental message count
+    uint16_t commandId;           // Command ID
+    uint8_t acknowledgementType;  // 0 - No info, 1 - Positive ACK, 2 - Negative ACK
+    uint8_t reasonForFailureCode; // Reason for failure
+};
+
+#pragma pack(pop)  // Reset packing to default
+#endif // PROTOCOL_H
+2. Implement FILE READ Command Handling in the Server
+Update the server.cpp file to handle the FILE READ command and send back the FILE READ ACK.
+
+cpp
+Copy code
+void Server::v_acknowledgementToAliveCommand() {
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_udpSocket->pendingDatagramSize());
+        m_udpSocket->readDatagram(datagram.data(), datagram.size());
+
+        std::cout << "Received datagram of size:" << datagram.size() << std::endl;
+
+        if (datagram.size() == sizeof(RequestCommand)) {
+            RequestCommand command;
+            std::memcpy(&command, datagram.data(), sizeof(command));
+
+            if (command.commandId == 1001) {
+                std::cout << "Received ALIVE command from client:" << std::endl;
+                std::cout << "messageId:" << command.messageId << std::endl;
+                std::cout << "messageCount:" << command.messageCount << std::endl;
+                std::cout << "commandId:" << command.commandId << std::endl;
+
+                ResponseCommand response;
+                response.messageId = 0x5678;
+                response.messageCount = command.messageCount;
+                response.commandId = 1001;
+                response.acknowledgementType = 1;  // Positive ACK
+                response.reasonForFailureCode = 0;
+
+                QByteArray responseDatagram(reinterpret_cast<const char*>(&response), sizeof(response));
+                m_udpSocket->writeDatagram(responseDatagram, QHostAddress::LocalHost, 5678);
+                std::cout << "Sent ALIVE_ACK response to client:" << std::endl;
+
+            } else if (command.commandId == 1003) {
+                std::cout << "Received FILE READ command from client:" << std::endl;
+                std::cout << "messageId:" << command.messageId << std::endl;
+                std::cout << "messageCount:" << command.messageCount << std::endl;
+                std::cout << "commandId:" << command.commandId << std::endl;
+
+                // Process the file data (not implemented in this example)
+
+                ResponseCommand response;
+                response.messageId = 0x1213;
+                response.messageCount = command.messageCount;
+                response.commandId = 1003;
+                response.acknowledgementType = 1;  // Positive ACK
+                response.reasonForFailureCode = 0;
+
+                QByteArray responseDatagram(reinterpret_cast<const char*>(&response), sizeof(response));
+                m_udpSocket->writeDatagram(responseDatagram, QHostAddress::LocalHost, 5678);
+                std::cout << "Sent FILE READ ACK response to client:" << std::endl;
+
+            } else {
+                std::cout << "Received command with unexpected commandId:" << command.commandId << std::endl;
+            }
+
+        } else {
+            std::cout << "Received datagram of unexpected size:" << datagram.size() << std::endl;
+        }
+    }
+}
+3. Implement the FILE READ Command Sending in the Client
+Update the mainwindow.cpp file to send the FILE READ command when a button is clicked.
+
+cpp
+Copy code
+void MainWindow::v_sendFileReadCommand() {
+    RequestCommand command;
+    command.messageId = 0x9101;
+    command.messageCount = ++m_messageCount;
+    command.commandId = 1003;
+
+    // Read file data (not implemented in this example)
+    std::memset(command.data, 0, sizeof(command.data));
+
+    QByteArray datagram(reinterpret_cast<const char*>(&command), sizeof(command));
+    m_udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 1234);
+    m_responseTimer->start(1500);  // Wait for 1.5 seconds for a response
+}
+
+void MainWindow::v_responseToFileReadCommand() {
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_udpSocket->pendingDatagramSize());
+        m_udpSocket->readDatagram(datagram.data(), datagram.size());
+
+        if (datagram.size() == sizeof(ResponseCommand)) {
+            ResponseCommand response;
+            std::memcpy(&response, datagram.data(), sizeof(response));
+
+            if (response.commandId == 1003) {
+                bool success = (response.acknowledgementType == 1);
+                v_updateLabel(ui->lbl_FILE_READ, success);
+            }
+        }
+    }
+}
+
+void MainWindow::v_updateLabel(QLabel *label, bool success) {
+    if (success) {
+        label->setStyleSheet("background-color: green;");
+    } else {
+        label->setStyleSheet("background-color: red;");
+    }
+}
+4. Update mainwindow.h to Include New Function Declarations
+cpp
+Copy code
+class MainWindow : public QMainWindow {
+    Q_OBJECT
+
+public:
+    explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow();
+
+private slots:
+    void v_on_pbBrowse_clicked();
+    void v_sendAliveCommand();
+    void v_responseToAliveCommand();
+    void v_sendFileReadCommand();
+    void v_responseToFileReadCommand();
+
+private:
+    void v_updateLabel(QLabel *label, bool success);
+
+    Ui::MainWindow *ui;
+    QUdpSocket *m_udpSocket;
+    QTimer *m_responseTimer;
+    uint32_t m_messageCount;
+};
+5. Connect the New Slots to UI Elements
+Update the MainWindow constructor in mainwindow.cpp:
+
+cpp
+Copy code
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+    m_udpSocket = new QUdpSocket();
+    m_responseTimer = new QTimer();
+    m_messageCount = 0;
+    m_responseTimer->setInterval(1500);
+    connect(ui->pb_Browse, &QPushButton::pressed, this, &MainWindow::v_on_pbBrowse_clicked);
+    connect(ui->tb_ALIVE, &QToolButton::clicked, this, &MainWindow::v_sendAliveCommand);
+    connect(ui->tb_FILE_READ, &QToolButton::clicked, this, &MainWindow::v_sendFileReadCommand); // Connect FILE READ button
+    if (!m_udpSocket->bind(QHostAddress::LocalHost, 5678)) {
+        std::cerr << "FAILED TO BIND UDP SOCKET" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    connect(m_udpSocket, &QUdpSocket::readyRead, this, &MainWindow::v_responseToAliveCommand);
+    connect(m_udpSocket, &QUdpSocket::readyRead, this, &MainWindow::v_responseToFileReadCommand); // Connect response handler
+}
+With these updates, you can now handle the FILE READ command and its acknowledgment using the existing RequestCommand and ResponseCommand structures. This approach ensures that the protocol remains consistent and extends the functionality without introducing new structures.
