@@ -1,0 +1,123 @@
+To handle varying file sizes, such as 1 MB or 2 MB, using UDP, you'll need to modify the code to send the data in chunks. UDP has a limit on the size of each datagram (typically around 64 KB), so you'll need to break the file into smaller chunks and send each chunk individually.
+
+Structure Update
+To handle larger files, the SendCommand structure needs to be updated. You'll need to include fields to manage chunking, such as a chunk index and the total number of chunks. Here’s how you can modify the structure:
+
+cpp
+Copy code
+struct SendCommand
+{
+    uint32_t messageID;
+    uint32_t messageCount;
+    uint16_t commandID;
+    uint8_t spare2;
+    uint8_t spare3;
+    uint32_t chunkIndex;      // Current chunk index
+    uint32_t totalChunks;     // Total number of chunks
+    uint32_t dataSize;        // Size of the data in this chunk
+    char c_str[1024];         // Data chunk (increased size)
+};
+Client-Side Code
+The client code will need to read the file in chunks, populate the SendCommand structure with each chunk, and send it via UDP:
+
+cpp
+Copy code
+void MainWindow::v_sendFileReadCommand()
+{
+    QString get_FileLocation = ui->leSelectedFile->text();
+    QFile mFile(get_FileLocation);
+
+    if (!mFile.open(QFile::ReadOnly)) // Open file in binary mode
+    {
+        v_updateLabel(ui->lbl_File_Read, 0);
+        return;
+    }
+
+    QByteArray fileData = mFile.readAll();
+    mFile.close();
+
+    const int chunkSize = sizeof(SendCommand::c_str); // Size of the data field in SendCommand
+    int totalChunks = (fileData.size() + chunkSize - 1) / chunkSize;
+
+    for (int i = 0; i < totalChunks; ++i)
+    {
+        SendCommand file_ReadCommand;
+        file_ReadCommand.messageID = 0x8553;
+        file_ReadCommand.messageCount = ++m_messageCount;
+        file_ReadCommand.commandID = 1003;
+        file_ReadCommand.spare2 = 0;
+        file_ReadCommand.spare3 = 0;
+        file_ReadCommand.chunkIndex = i;
+        file_ReadCommand.totalChunks = totalChunks;
+        file_ReadCommand.dataSize = qMin(chunkSize, fileData.size() - i * chunkSize);
+
+        memcpy(file_ReadCommand.c_str, fileData.constData() + i * chunkSize, file_ReadCommand.dataSize);
+
+        QByteArray datagram(reinterpret_cast<const char*>(&file_ReadCommand), sizeof(file_ReadCommand));
+        m_udpSocket->writeDatagram(datagram, QHostAddress("172.195.121.216"), 80);
+    }
+}
+Server-Side Code
+The server code needs to reassemble the chunks into the original file:
+
+cpp
+Copy code
+case 1003:
+{
+    std::cout << "RECEIVED FILE_READ COMMAND FROM CLIENT" << std::endl;
+
+    static QByteArray completeFileData;
+    static int expectedChunks = -1;
+
+    if (expectedChunks == -1) {
+        expectedChunks = command.totalChunks;
+        completeFileData.resize(expectedChunks * sizeof(SendCommand::c_str));
+    }
+
+    memcpy(completeFileData.data() + command.chunkIndex * sizeof(SendCommand::c_str),
+           command.c_str, command.dataSize);
+
+    if (command.chunkIndex == expectedChunks - 1) // Last chunk received
+    {
+        QDir makeDir;
+        QString mpath = "E:/gui_programs/server1/File_Store";
+        if (!makeDir.exists(mpath))
+        {
+            makeDir.mkpath(mpath);
+        }
+
+        QString file_Location = "E:/gui_programs/server1/File_Store/program_file.bin";
+        QFile program_File(file_Location);
+
+        if (!program_File.open(QFile::WriteOnly))
+        {
+            return;
+        }
+
+        program_File.write(completeFileData);
+        program_File.flush();
+        program_File.close();
+
+        expectedChunks = -1; // Reset for next file
+        completeFileData.clear();
+
+        ResponseCommand file_ReadResponse;
+        file_ReadResponse.messageID = 0x3324;
+        file_ReadResponse.messageCount = command.messageCount;
+        file_ReadResponse.commandID = 1003;
+        file_ReadResponse.acknowledgementType = 1;
+        file_ReadResponse.reasonforFailureCode = 0;
+
+        QByteArray responsedatagram(reinterpret_cast<const char*>(&file_ReadResponse), sizeof(file_ReadResponse));
+        m_UdpSocket->writeDatagram(responsedatagram, QHostAddress("172.195.121.80"), 100);
+
+        std::cout << "SENT FILE_READ ACKNOWLEDGEMENT" << std::endl;
+        std::cout << "SYSTEM IS READING THE FILE...." << std::endl;
+    }
+}
+break;
+Key Points:
+Chunking: The file is divided into chunks, with each chunk being sent in a separate SendCommand structure.
+Reassembly: The server reassembles the file by collecting all the chunks and writing them to disk in the correct order.
+State Management: The server tracks the number of chunks received to know when the full file has been received.
+This approach ensures that even large files can be reliably transmitted over UDP, and the server can correctly reconstruct the original file.
