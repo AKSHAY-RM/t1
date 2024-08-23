@@ -1,0 +1,319 @@
+#include <QCoreApplication>
+#include <QUdpSocket>
+#include <QFile>
+#include <QDir>
+#include <QDebug>
+
+const int MAX_BUFFER_SIZE = 65507;  // Maximum size for UDP packet
+
+void startServer(quint16 port) {
+    QUdpSocket udpSocket;
+    if (!udpSocket.bind(QHostAddress::Any, port)) {
+        std::cout<< "Failed to bind UDP socket!"<<std::endl;
+        return;
+    }
+    udpSocket.setReadBufferSize(MAX_BUFFER_SIZE);
+
+    QByteArray receivedData;
+    while (true) {
+        while (udpSocket.waitForReadyRead(-1)) {
+            while (udpSocket.hasPendingDatagrams()) {
+                QByteArray buffer;
+                buffer.resize(udpSocket.pendingDatagramSize());
+                udpSocket.readDatagram(buffer.data(), buffer.size());
+                receivedData.append(buffer);
+            }
+        }
+
+        QString directoryPath = "received_files";
+        if (!QDir(directoryPath).exists()) {
+            QDir().mkdir(directoryPath);
+        }
+
+        QString filePath = directoryPath + "/received_file.dat";  // Store as a binary file
+        QFile file(filePath);
+        if (file.open(QIODevice::WriteOnly)) {
+            file.write(receivedData);
+            file.close();
+             std::cout<< "File received and stored successfully at:" <<std::endl;
+        } else {
+             std::cout<<"Failed to write file."<<std::endl;
+        }
+
+        receivedData.clear();  // Clear the buffer after saving the file
+    }
+}
+
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+
+    quint16 port = 1234;  // Server listening port
+
+    startServer(port);
+
+    return a.exec();
+}
+or
+#include <QCoreApplication>
+#include <QUdpSocket>
+#include <QFile>
+#include <QDir>
+#include <QDebug>
+#include <iostream> // Include this for std::cout
+
+const int MAX_BUFFER_SIZE = 65507;  // Maximum size for UDP packet
+
+void startServer(quint16 port) {
+    QUdpSocket udpSocket;
+    if (!udpSocket.bind(QHostAddress::Any, port)) {
+        std::cout << "Failed to bind UDP socket!" << std::endl;
+        return;
+    }
+    udpSocket.setReadBufferSize(MAX_BUFFER_SIZE);
+
+    QByteArray receivedData;
+    while (true) {
+        while (udpSocket.waitForReadyRead(-1)) {
+            while (udpSocket.hasPendingDatagrams()) {
+                QByteArray buffer;
+                buffer.resize(udpSocket.pendingDatagramSize());
+                udpSocket.readDatagram(buffer.data(), buffer.size());
+                receivedData.append(buffer);
+            }
+        }
+
+        QString directoryPath = "received_files";
+        if (!QDir(directoryPath).exists()) {
+            QDir().mkdir(directoryPath);
+        }
+
+        QString filePath = directoryPath + "/received_file.dat";  // Store as a binary file
+        QFile file(filePath);
+        if (file.open(QIODevice::WriteOnly)) {
+            file.write(receivedData);
+            file.close();
+            std::cout << "File received and stored successfully at: " << filePath.toStdString() << std::endl;
+        } else {
+            std::cout << "Failed to write file." << std::endl;
+        }
+
+        receivedData.clear();  // Clear the buffer after saving the file
+    }
+}
+
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+
+    quint16 port = 1234;  // Server listening port
+
+    startServer(port);
+
+    return a.exec();
+}
+
+-------------------------------------------------------------------------------------------------------------------------
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QMainWindow>
+#include <QUdpSocket>
+
+QT_BEGIN_NAMESPACE
+namespace Ui { class MainWindow; }
+QT_END_NAMESPACE
+
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    MainWindow(QWidget *parent = nullptr);
+    ~MainWindow();
+
+private slots:
+    void on_pushButton_clicked();
+    void on_sendButton_clicked();
+
+private:
+    Ui::MainWindow *ui;
+    QString selectedFilePath;  // Added this member variable
+    QUdpSocket *m_udpSocket;
+};
+
+#endif // MAINWINDOW_H
+------------------------------------------------------------------------------------------------------------------
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include<QDir>
+#include<QFileDialog>
+#include<QDebug>
+
+const int MAX_BUFFER_SIZE = 65507;
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+    , m_udpSocket(new QUdpSocket(this))
+{
+    ui->setupUi(this);
+    if (!m_udpSocket->bind(QHostAddress::LocalHost, 1234)) {
+        exit(EXIT_FAILURE);
+    }
+    connect(ui->pushButton, &QAbstractButton::pressed, this, &MainWindow::on_pushButton_clicked);
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+void MainWindow::on_pushButton_clicked()
+{
+    selectedFilePath = QDir::toNativeSeparators(QFileDialog::getOpenFileName(this, tr("Find Files"), QDir::currentPath()));
+    ui->lineEdit->setText(selectedFilePath);
+}
+
+void MainWindow::on_sendButton_clicked()
+{
+    if (selectedFilePath.isEmpty()) {
+        qDebug() << "No file selected!";
+        return;
+    }
+
+    QFile file(selectedFilePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qDebug() << "Failed to open file:" << selectedFilePath;
+        return;
+    }
+
+    QByteArray fileData = file.readAll();
+    file.close();
+
+    QString serverAddress = "127.0.0.1";  // Set the server address here
+    quint16 serverPort = 1234;            // Set the server port here
+
+    // Split the data into chunks and send
+    qint64 totalBytesSent = 0;
+    while (totalBytesSent < fileData.size()) {
+        QByteArray chunk = fileData.mid(totalBytesSent, MAX_BUFFER_SIZE);
+        qint64 bytesSent = m_udpSocket->writeDatagram(chunk, QHostAddress(serverAddress), serverPort);
+        if (bytesSent == -1) {
+            qDebug() << "Failed to send data.";
+            return;
+        }
+        totalBytesSent += bytesSent;
+    }
+
+    qDebug() << "File sent successfully.";
+}
+
+-------------------------------------------------------------------------------------------------------------------------------
+To create a Qt Creator project where a client sends a data file (up to 55 MB) to a server using UDP sockets, and the server stores the file in a directory, follow the steps below.
+
+1. Create the Qt Creator Project
+Start by creating a new Qt Console Application in Qt Creator.
+
+2. Implement the Client Code
+Client:
+
+cpp
+Copy code
+#include <QCoreApplication>
+#include <QUdpSocket>
+#include <QFile>
+#include <QHostAddress>
+#include <QFileInfo>
+#include <QDebug>
+
+const int MAX_BUFFER_SIZE = 65507;  // Maximum size for UDP packet
+
+void sendFile(const QString &filePath, const QString &serverAddress, quint16 serverPort) {
+    QUdpSocket udpSocket;
+    udpSocket.setReadBufferSize(MAX_BUFFER_SIZE);
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qDebug() << "Failed to open file:" << filePath;
+        return;
+    }
+
+    QByteArray fileData = file.readAll();
+    file.close();
+
+    // Split the data into chunks and send
+    qint64 totalBytesSent = 0;
+    while (totalBytesSent < fileData.size()) {
+        QByteArray chunk = fileData.mid(totalBytesSent, MAX_BUFFER_SIZE);
+        qint64 bytesSent = udpSocket.writeDatagram(chunk, QHostAddress(serverAddress), serverPort);
+        if (bytesSent == -1) {
+            qDebug() << "Failed to send data.";
+            return;
+        }
+        totalBytesSent += bytesSent;
+    }
+
+    qDebug() << "File sent successfully.";
+}
+
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+
+    QString filePath = "path_to_your_file";  // Set the file path here
+    QString serverAddress = "127.0.0.1";     // Set the server address here
+    quint16 serverPort = 1234;               // Set the server port here
+
+    sendFile(filePath, serverAddress, serverPort);
+
+    return a.exec();
+}
+3. Implement the Server Code
+Server:
+
+cpp
+Copy code
+#include <QCoreApplication>
+#include <QUdpSocket>
+#include <QFile>
+#include <QDir>
+#include <QDebug>
+
+const int MAX_BUFFER_SIZE = 65507;  // Maximum size for UDP packet
+
+void startServer(quint16 port) {
+    QUdpSocket udpSocket;
+    udpSocket.bind(QHostAddress::Any, port);
+    udpSocket.setReadBufferSize(MAX_BUFFER_SIZE);
+
+    QByteArray receivedData;
+    while (udpSocket.waitForReadyRead(-1)) {
+        while (udpSocket.hasPendingDatagrams()) {
+            QByteArray buffer;
+            buffer.resize(udpSocket.pendingDatagramSize());
+            udpSocket.readDatagram(buffer.data(), buffer.size());
+            receivedData.append(buffer);
+        }
+    }
+
+    QString directoryPath = "received_files";
+    QDir().mkdir(directoryPath);
+
+    QString filePath = directoryPath + "/received_file.dat";  // Store as a binary file
+    QFile file(filePath);
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(receivedData);
+        file.close();
+        qDebug() << "File received and stored successfully at:" << filePath;
+    } else {
+        qDebug() << "Failed to write file.";
+    }
+}
+
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+
+    quint16 port = 1234;  // Server listening port
+
+    startServer(port);
+
+    return a.exec();
+}
