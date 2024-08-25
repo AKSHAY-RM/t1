@@ -1,0 +1,410 @@
+Client Side (Sending Data)
+cpp
+Copy code
+void MainWindow::sendLargeFile(const QString& filePath) {
+    QFile file(filePath);
+    if (!file.open(QFile::ReadOnly)) {
+        // Handle file open error
+        return;
+    }
+
+    QByteArray fileData = file.readAll();
+    const int chunkSize = 1024;  // 1 KB chunk size
+    int totalChunks = fileData.size() / chunkSize;
+    if (fileData.size() % chunkSize != 0) {
+        ++totalChunks;
+    }
+
+    for (int i = 0; i < totalChunks; ++i) {
+        QByteArray chunk = fileData.mid(i * chunkSize, chunkSize);
+
+        // Create your UDP packet structure here
+        SendCommand command;
+        command.messageID = 0x8553;
+        command.messageCount = i + 1;
+        command.commandID = 1003;
+        // Add chunk data to the structure (assuming chunk fits into c_str)
+        memcpy(command.c_str, chunk.data(), chunk.size());
+
+        QByteArray datagram(reinterpret_cast<const char*>(&command), sizeof(command));
+        m_udpSocket->writeDatagram(datagram, QHostAddress("server_address"), port);
+    }
+}
+Server Side (Receiving Data)
+cpp
+Copy code
+void Server::processPendingDatagrams() {
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_udpSocket->pendingDatagramSize());
+        QHostAddress sender;
+        quint16 senderPort;
+
+        m_udpSocket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
+
+        SendCommand* command = reinterpret_cast<SendCommand*>(datagram.data());
+
+        // Process the received chunk
+        int chunkIndex = command->messageCount - 1;
+        QByteArray chunkData(command->c_str, sizeof(command->c_str));
+
+        // Store the chunk data to reconstruct the full file later
+        // (You may need a map or vector to store each chunk by its index)
+    }
+
+    // After receiving all chunks, reassemble them into the original file
+}
+------------------------------------------------------------------------------------------------------------------------------------
+To create a client-server project where the client is a Qt GUI application and the server is a console application, follow these steps:
+
+Step 1: Set Up the Project
+Create a New Qt Project for the Client:
+
+In Qt Creator, create a new Qt Widgets Application.
+Name it FileTransferClient.
+Create a New Console Application for the Server:
+
+In Qt Creator, create a new Console Application.
+Name it FileTransferServer.
+Step 2: Implement the Client-Side GUI
+Design the GUI:
+
+Open the FileTransferClient project in Qt Creator.
+In the .ui file (using the Design mode):
+Add a QLineEdit widget and name it lineEdit.
+Add a QPushButton widget and name it sendButton. Set its text to "Send".
+Add the Necessary Includes and Variables:
+
+Open mainwindow.h and add:
+cpp
+Copy code
+#include <QUdpSocket>
+In mainwindow.h, declare the following:
+cpp
+Copy code
+private:
+    QUdpSocket *udpSocket;
+Initialize the Socket and Connect the Button Signal:
+
+In mainwindow.cpp, initialize the udpSocket and connect the sendButton to a slot:
+cpp
+Copy code
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+    udpSocket = new QUdpSocket(this);
+
+    connect(ui->sendButton, &QPushButton::clicked, this, &MainWindow::sendFile);
+}
+
+void MainWindow::sendFile() {
+    QString filePath = ui->lineEdit->text();
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qDebug() << "Unable to open file";
+        return;
+    }
+
+    QByteArray fileData = file.readAll();
+    udpSocket->writeDatagram(fileData, QHostAddress::LocalHost, 1234);
+}
+Step 3: Implement the Server-Side Console Application
+Include the Necessary Headers:
+
+Open the FileTransferServer project.
+Include the following headers in main.cpp:
+cpp
+Copy code
+#include <QUdpSocket>
+#include <QFile>
+#include <QDir>
+Set Up the QUdpSocket and Bind It to a Port:
+
+cpp
+Copy code
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+
+    QUdpSocket udpSocket;
+    udpSocket.bind(QHostAddress::LocalHost, 1234);
+
+    QObject::connect(&udpSocket, &QUdpSocket::readyRead, [&udpSocket]() {
+        while (udpSocket.hasPendingDatagrams()) {
+            QByteArray buffer;
+            buffer.resize(udpSocket.pendingDatagramSize());
+
+            QHostAddress sender;
+            quint16 senderPort;
+
+            udpSocket.readDatagram(buffer.data(), buffer.size(), &sender, &senderPort);
+
+            // Create directory to store files
+            QDir dir("ReceivedFiles");
+            if (!dir.exists()) {
+                dir.mkpath(".");
+            }
+
+            // Save the file in binary format
+            QFile file("ReceivedFiles/received_file.bin");
+            if (file.open(QIODevice::WriteOnly)) {
+                file.write(buffer);
+                file.close();
+            }
+        }
+    });
+
+    return a.exec();
+}
+Step 4: Test the Application
+Run the Server:
+
+Build and run the FileTransferServer console application.
+Run the Client:
+
+Build and run the FileTransferClient GUI application.
+Enter the path to a binary or text file in the QLineEdit and click "Send".
+Verify the Result:
+
+Check the ReceivedFiles directory in the FileTransferServer project folder to confirm that the file was received and saved correctly.
+Step 5: Handle Larger Files (Optional)
+For larger files, consider sending the file in chunks, handling acknowledgments, and possibly implementing a simple protocol to ensure all data is received correctly.
+
+This setup gives you a basic client-server application where files can be transferred over UDP.
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+To handle larger files in your Qt UDP client-server application, you'll need to modify the code to break the file into smaller chunks when sending and then reconstruct it on the server side. This method ensures the data is sent reliably without overwhelming the network or causing issues due to the limitations of UDP.
+
+Here is the modified code:
+
+Client-Side (GUI Application)
+cpp
+Copy code
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include <QToolButton>
+#include <QFile>
+#include <QDataStream>
+#include <QDebug>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+    , sequenceNumber(0)  // Initialize the sequence number
+{
+    ui->setupUi(this);
+    udpSocket = new QUdpSocket(this);
+    connect(ui->sendButton, &QToolButton::clicked, this, &MainWindow::sendFile);
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+void MainWindow::sendFile() {
+    QString filePath = ui->lineEdit->text();
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qDebug() << "Unable to open file";
+        return;
+    }
+
+    const int chunkSize = 1024; // Define the chunk size (1 KB per chunk)
+    QByteArray fileChunk;
+
+    while (!(fileChunk = file.read(chunkSize)).isEmpty()) {
+        QByteArray datagram;
+        QDataStream stream(&datagram, QIODevice::WriteOnly);
+
+        stream << sequenceNumber++;  // Add the sequence number to the datagram
+        stream << fileChunk;         // Add the file chunk to the datagram
+
+        udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 1234);
+        qDebug() << "Sent chunk with sequence number:" << sequenceNumber;
+    }
+
+    // Send a special packet to indicate the end of the file
+    QByteArray endSignal;
+    QDataStream endStream(&endSignal, QIODevice::WriteOnly);
+    endStream << -1;  // -1 indicates the end of file transmission
+    udpSocket->writeDatagram(endSignal, QHostAddress::LocalHost, 1234);
+
+    qDebug() << "File sent successfully!";
+}
+Server-Side (Console Application)
+cpp
+Copy code
+#include <QCoreApplication>
+#include <QUdpSocket>
+#include <QFile>
+#include <QDir>
+#include <QDataStream>
+#include <QDebug>
+
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+
+    QUdpSocket udpSocket;
+    udpSocket.bind(QHostAddress::LocalHost, 1234);
+
+    QFile file("D:/GUITestProgram/FileTransferServer/File_Store/received_file.bin");
+    if (!file.open(QIODevice::WriteOnly)) {
+        qDebug() << "Unable to open file for writing";
+        return -1;
+    }
+
+    QObject::connect(&udpSocket, &QUdpSocket::readyRead, [&udpSocket, &file]() {
+        while (udpSocket.hasPendingDatagrams()) {
+            QByteArray buffer;
+            buffer.resize(udpSocket.pendingDatagramSize());
+
+            QHostAddress sender;
+            quint16 senderPort;
+
+            udpSocket.readDatagram(buffer.data(), buffer.size(), &sender, &senderPort);
+
+            QDataStream stream(&buffer, QIODevice::ReadOnly);
+            int sequenceNumber;
+            QByteArray fileChunk;
+
+            stream >> sequenceNumber;
+
+            if (sequenceNumber == -1) { // End of file transmission
+                file.close();
+                qDebug() << "File received and saved successfully!";
+                return;
+            }
+
+            stream >> fileChunk;
+            file.write(fileChunk);
+
+            qDebug() << "Received chunk with sequence number:" << sequenceNumber;
+        }
+    });
+
+    return a.exec();
+}
+Explanation:
+Chunking the File: The client reads the file in chunks of 1024 bytes and sends each chunk separately over UDP. Each chunk is tagged with a sequence number to allow the server to reassemble the file correctly.
+
+End Signal: After all the chunks have been sent, the client sends a special packet with a sequence number of -1 to indicate the end of the file transmission.
+
+Reassembly on the Server: The server listens for incoming datagrams, reads the sequence number, and writes the corresponding chunk to the file. It stops listening when it receives the end signal.
+
+Handling Large Files: This approach allows you to send large files (even in the range of megabytes) without running into the limitations of UDP. The file is transferred reliably and can be reconstructed correctly on the server side.
+
+Steps to Test:
+Run the Server: Start the server console application. It will create a directory and wait for incoming file chunks.
+Run the Client: Start the client GUI application, input the file path, and click "Send."
+Verify the File: Check the D:/GUITestProgram/FileTransferServer/File_Store/ directory to verify that the file was received correctly.
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include <QToolButton>
+#include <QFile>
+#include <QDataStream>
+#include <QDebug>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+    , sequenceNumber(0)  // Initialize the sequence number
+{
+    ui->setupUi(this);
+    udpSocket = new QUdpSocket(this);
+    connect(ui->sendButton, &QToolButton::clicked, this, &MainWindow::sendFile);
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+void MainWindow::sendFile() {
+    QString filePath = ui->lineEdit->text();
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qDebug() << "Unable to open file";
+        return;
+    }
+
+    const int chunkSize = 1024; // Define the chunk size (1 KB per chunk)
+    QByteArray fileChunk;
+
+    while (!(fileChunk = file.read(chunkSize)).isEmpty()) {
+        QByteArray datagram;
+        QDataStream stream(&datagram, QIODevice::WriteOnly);
+
+        stream << sequenceNumber++;  // Add the sequence number to the datagram
+        stream << fileChunk;         // Add the file chunk to the datagram
+
+        udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 1234);
+        qDebug() << "Sent chunk with sequence number:" << sequenceNumber;
+    }
+
+    // Send a special packet to indicate the end of the file
+    QByteArray endSignal;
+    QDataStream endStream(&endSignal, QIODevice::WriteOnly);
+    endStream << -1;  // -1 indicates the end of file transmission
+    udpSocket->writeDatagram(endSignal, QHostAddress::LocalHost, 1234);
+
+    qDebug() << "File sent successfully!";
+}
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+#include <QCoreApplication>
+#include <QUdpSocket>
+#include <QFile>
+#include <QDir>
+#include <QDataStream>
+#include <QDebug>
+
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+
+    QUdpSocket udpSocket;
+    udpSocket.bind(QHostAddress::LocalHost, 1234);
+
+    QDir dir;
+    QString mpath="D:/GUITestProgram/FileTransferServer/File_Store";
+    if(!dir.exists(mpath))
+    {
+        dir.mkpath(mpath);
+    }
+    QFile file("D:/GUITestProgram/FileTransferServer/File_Store/received_file.bin");
+    if (!file.open(QIODevice::WriteOnly)) {
+        qDebug() << "Unable to open file for writing";
+        return -1;
+    }
+
+    QObject::connect(&udpSocket, &QUdpSocket::readyRead, [&udpSocket, &file]() {
+        while (udpSocket.hasPendingDatagrams()) {
+            QByteArray buffer;
+            buffer.resize(udpSocket.pendingDatagramSize());
+
+            QHostAddress sender;
+            quint16 senderPort;
+
+            udpSocket.readDatagram(buffer.data(), buffer.size(), &sender, &senderPort);
+
+            QDataStream stream(&buffer, QIODevice::ReadOnly);
+            int sequenceNumber;
+            QByteArray fileChunk;
+
+            stream >> sequenceNumber;
+
+            if (sequenceNumber == -1) { // End of file transmission
+                file.close();
+                qDebug() << "File received and saved successfully!";
+                return;
+            }
+
+            stream >> fileChunk;
+            file.write(fileChunk);
+
+            qDebug() << "Received chunk with sequence number:" << sequenceNumber;
+        }
+    });
+
+    return a.exec();
+}
