@@ -1,0 +1,519 @@
+#include <QCoreApplication>
+#include "serverside.h"
+#include<QFile>
+#include<QDir>
+#include<QHostAddress>
+#include<QByteArray>
+#include<cstring>
+#include<iostream>
+
+serverside::serverside(QObject *parent) : QObject(parent)
+{
+    m_UdpSocket = new QUdpSocket();
+    if(!m_UdpSocket->bind(QHostAddress::LocalHost,9999))
+    {
+        std::cerr<<"Failed to bind udp Socket!"<<std::endl;
+        exit(EXIT_FAILURE);
+    }
+    connect(m_UdpSocket,&QUdpSocket::readyRead,this,&serverside::v_handleCommands);
+
+    std::cout<<"server is running and waiting for message..."<<std::endl;
+}
+
+void serverside::v_handleCommands()
+{
+    while(m_UdpSocket->hasPendingDatagrams())
+    {
+        QByteArray datagram;
+        datagram.resize(m_UdpSocket->pendingDatagramSize());
+        m_UdpSocket->readDatagram(datagram.data(),datagram.size());
+        if(datagram.size()==sizeof(SendCommand))
+        {
+            SendCommand command;
+            std::memcpy(&command,datagram.data(),sizeof(command));
+            switch (command.commandID) {
+            case 1001:
+            {
+                std::cout<< "RECEIVED ALIVE COMMAND FROM CLIENT"<<std::endl;
+                ResponseCommand response;
+                response.messageID=0X5678;
+                response.messageCount=command.messageCount;
+                response.commandID=1001;
+                response.acknowledgementType=1;
+                response.reasonforFailureCode=0;
+                QByteArray responsedatagram(reinterpret_cast<const char*>(&response),sizeof(response));
+                m_UdpSocket->writeDatagram(responsedatagram,QHostAddress::LocalHost,8888);
+                std::cout<<"SENT ALIVE ACKNOWLEDGEMENT"<<std::endl;
+
+            }
+                break;
+
+             case 1002:
+            {
+                std::cout<< "RECEIVED CONFIG COMMAND FROM CLIENT"<<std::endl;
+                ResponseCommand configresponse;
+               configresponse.messageID=0X3324;
+               configresponse.messageCount=command.messageCount;
+               configresponse.commandID=1002;
+               configresponse.acknowledgementType=1;
+               configresponse.reasonforFailureCode=0;
+                QByteArray responsedatagram(reinterpret_cast<const char*>(&configresponse),sizeof(configresponse));
+                m_UdpSocket->writeDatagram(responsedatagram,QHostAddress::LocalHost,8888);
+                std::cout<<"SENT CONFIG ACKNOWLEDGEMENT"<<std::endl;
+                std::cout<<"SYSTEM IS READY TO ACCEPT FILE...."<<std::endl;
+
+            }
+                break;
+
+             case 1003:
+             {
+                 std::cout << "RECEIVED FILE_READ COMMAND FROM CLIENT" << std::endl;
+
+                 QString mpath = "E:/server1/File_Store";
+                 QDir makeDir;
+                 if (!makeDir.exists(mpath)) {
+                     makeDir.mkpath(mpath);
+                 }
+
+                 // Check if a new file needs to be saved
+                 static bool isNewFile = true;
+                 if (isNewFile) {
+                     QDir dir(mpath);
+                     if (dir.exists()) {
+                         if (!dir.removeRecursively()) {
+                             std::cout << "Failed to delete directory and its contents" << std::endl;
+                             return;
+                         }
+                     }
+
+                     if (!dir.mkpath(mpath)) {
+                         std::cout << "Failed to create directory" << std::endl;
+                         return;
+                     }
+
+                     isNewFile = false; // Reset the flag for subsequent file chunks
+                 }
+
+                 QString file_Location = mpath + "/program_file_testing.txt";
+                 QFile program_File(file_Location);
+                 if (!program_File.open(QFile::WriteOnly | QFile::Append)) {
+                     std::cout << "Unable to open file for writing" << std::endl;
+                     return;
+                 }
+
+                 // Handle incoming data chunks
+                 while (m_UdpSocket->hasPendingDatagrams()) {
+                     QByteArray buffer;
+                     buffer.resize(m_UdpSocket->pendingDatagramSize());
+
+                     QHostAddress sender;
+                     quint16 senderPort;
+
+                     m_UdpSocket->readDatagram(buffer.data(), buffer.size(), &sender, &senderPort);
+
+                     QDataStream stream(&buffer, QIODevice::ReadOnly);
+                     int sequenceNumber;
+                     QByteArray fileChunk;
+
+                     stream >> sequenceNumber;
+
+                     if (sequenceNumber == -1) { // End of file transmission
+                         program_File.close();
+                         std::cout << "File received and saved successfully!" << std::endl;
+                         isNewFile = true; // Ready for a new file in the future
+                         return;
+                     }
+
+                     stream >> fileChunk;
+                     program_File.write(fileChunk);
+                     std::cout << "Received chunk with sequence number: " << sequenceNumber << std::endl;
+                     std::cout << "Received Bytes: " << fileChunk.size() << std::endl;
+                     // Send acknowledgment back to client
+                     QByteArray ackResponse;
+                     QDataStream ackStream(&ackResponse, QIODevice::WriteOnly);
+                     ackStream << 1; // Success acknowledgment
+                     m_UdpSocket->writeDatagram(ackResponse, sender, senderPort); // Make sure acknowledgment is sent to correct client
+                 }
+
+                 // Send FILE_READ response
+                 ResponseCommand file_ReadResponse;
+                 file_ReadResponse.messageID = 0X3324;
+                 file_ReadResponse.messageCount = command.messageCount;
+                 file_ReadResponse.commandID = 1003;
+                 file_ReadResponse.acknowledgementType = 1;
+                 file_ReadResponse.reasonforFailureCode = 0;
+                 QByteArray responsedatagram(reinterpret_cast<const char*>(&file_ReadResponse), sizeof(file_ReadResponse));
+                 m_UdpSocket->writeDatagram(responsedatagram, QHostAddress::LocalHost,8888);
+                 std::cout << "SENT FILE_READ ACKNOWLEDGEMENT" << std::endl;
+                 std::cout << "SYSTEM IS READING THE FILE...." << std::endl;
+             }
+             break;
+
+            case 1004:
+           {
+               std::cout<< "RECEIVED ERASE_MEM COMMAND FROM CLIENT"<<std::endl;
+               QString nFileName="E:/gui_programs/server1/Program_Files_store/exe.txt";
+               QString program_FileDir="E:/gui_programs/server1/Program_Files_store";
+               QDir mDir;
+               if(mDir.exists(program_FileDir))
+               {
+                   mDir.remove(nFileName);
+               }
+               ResponseCommand erase_MemResponse;
+              erase_MemResponse.messageID=0X2210;
+              erase_MemResponse.messageCount=command.messageCount;
+              erase_MemResponse.commandID=1004;
+              erase_MemResponse.acknowledgementType=1;
+              erase_MemResponse.reasonforFailureCode=0;
+               QByteArray responsedatagram(reinterpret_cast<const char*>(&erase_MemResponse),sizeof(erase_MemResponse));
+               m_UdpSocket->writeDatagram(responsedatagram,QHostAddress::LocalHost,8888);
+               std::cout<<"SENT ERASE_MEM ACKNOWLEDGEMENT"<<std::endl;
+               std::cout<<"SYSTEM IS READY TO PROGRAM_FILE...."<<std::endl;
+
+           }
+               break;
+            case 1005:
+           {
+               std::cout<< "RECEIVED PROGRAM FILE COMMAND FROM CLIENT"<<std::endl;
+               ResponseCommand program_FileResponse;
+               QString eFileName ="E:/gui_programs/server1/File_Store/program_file.txt";
+               QString nFileName="E:/gui_programs/server1/Program_Files_store/exe.txt";
+               QString program_FileDir="E:/gui_programs/server1/Program_Files_store";
+               QDir mDir;
+               if(mDir.exists(program_FileDir))
+               {
+                   QFile::copy(eFileName,nFileName);
+               }
+               else
+               {
+                   mDir.mkpath(program_FileDir);
+                   QFile::copy(eFileName,nFileName);
+               }
+
+               QFile nFileRead(nFileName);
+               if(!nFileRead.open(QFile::ReadOnly|QFile :: Text))
+               {
+                       program_FileResponse.acknowledgementType=0;
+                       return;
+               }
+               QTextStream in(&nFileRead);
+               QString mText = in.readAll();
+                std::cout <<mText.toStdString() << std::endl;
+              program_FileResponse.messageID=0X4556;
+              program_FileResponse.messageCount=command.messageCount;
+              program_FileResponse.commandID=1005;
+              program_FileResponse.acknowledgementType=1;
+              program_FileResponse.reasonforFailureCode=0;
+               QByteArray responsedatagram(reinterpret_cast<const char*>(&program_FileResponse),sizeof(program_FileResponse));
+               m_UdpSocket->writeDatagram(responsedatagram,QHostAddress::LocalHost,8888);
+               std::cout<<"SENT PROGRAM FILE ACKNOWLEDGEMENT"<<std::endl;
+
+           }
+               break;
+            case 1006:
+           {
+               std::cout<< "RECEIVED AUTO_BOOT_SET COMMAND FROM CLIENT"<<std::endl;
+               ResponseCommand auto_Boot_SetResponse;
+              auto_Boot_SetResponse.messageID=0X5588;
+              auto_Boot_SetResponse.messageCount=command.messageCount;
+              auto_Boot_SetResponse.commandID=1006;
+              auto_Boot_SetResponse.acknowledgementType=1;
+              auto_Boot_SetResponse.reasonforFailureCode=0;
+               QByteArray responsedatagram(reinterpret_cast<const char*>(&auto_Boot_SetResponse),sizeof(auto_Boot_SetResponse));
+               m_UdpSocket->writeDatagram(responsedatagram,QHostAddress::LocalHost,8888);
+               std::cout<<"SENT AUTO_BOOT_SET ACKNOWLEDGEMENT"<<std::endl;
+
+           }
+               break;
+            default:
+                break;
+            }
+
+    }
+}
+}
+
+int main(int argc, char *argv[])
+{
+    QCoreApplication a(argc, argv);
+    serverside server;
+
+
+    return a.exec();
+}
+-------------------------------------------------------------
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include<QDir>
+#include<QFileDialog>
+#include<QDebug>
+#include<cstring>
+#include<iostream>
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+    m_udpSocket = new QUdpSocket();
+    m_resposeTimer = new QTimer();
+    m_messageCount = 0;
+    m_resposeTimer->setInterval(1500);
+
+    if(!m_udpSocket->bind(QHostAddress::LocalHost,8888))
+
+    {
+        std::cerr<<"Failed to bind udp Socket!"<<std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    connect(ui->pbBrowseFile, &QAbstractButton::pressed, this, &MainWindow::v_on_pbBrowseFile_clicked);
+    connect(ui->tb_Alive,&QToolButton::clicked,this,&MainWindow::v_sendAliveCommand);
+    connect(m_udpSocket,&QUdpSocket::readyRead,this,&MainWindow::v_serverRespons);
+    connect(ui->tb_RESET,&QToolButton::clicked,this,&MainWindow::v_on_clickReset);
+    connect(ui->tb_QUIT,&QToolButton::clicked,this,&MainWindow::v_on_clickQuit);
+    connect(ui->tb_CONFIG,&QToolButton::clicked,this,&MainWindow::v_sendConfigCommand);
+    connect(ui->tb_FILE_READ,&QToolButton::clicked,this,&MainWindow::v_sendFileReadCommand);
+    connect(ui->tb_ERASE_MEM,&QToolButton::clicked,this,&MainWindow::v_sendErase_MemCommand);
+    connect(ui->tb_PROGRAM_FILE,&QToolButton::clicked,this,&MainWindow::v_sendProgram_FileCommand);
+    connect(ui->tb_AUTO_BOOT_SET,&QToolButton::clicked,this,&MainWindow::v_sendAuto_Boot_SetCommand);
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+void MainWindow::v_on_pbBrowseFile_clicked()
+{
+    QString directory =
+            QDir::toNativeSeparators(QFileDialog::getOpenFileName(this, tr("Find Files"), QDir::currentPath()));
+ui->leSelectedFile->setText(directory);
+
+}
+
+void MainWindow::v_sendAliveCommand()
+{
+    SendCommand command;
+    command.messageID=0X1234;
+    command.messageCount=++m_messageCount;
+    command.commandID=1001;
+    command.spare2=0;
+    command.spare3=0;
+    QByteArray datagram(reinterpret_cast<const char*>(&command),sizeof(command));
+    m_udpSocket->writeDatagram(datagram,QHostAddress::LocalHost,9999);
+
+}
+
+void MainWindow::v_sendConfigCommand()
+{
+    SendCommand configCommand;
+    configCommand.messageID=0X8553;
+    configCommand.messageCount=++m_messageCount;
+    configCommand.commandID=1002;
+    configCommand.spare2=0;
+    configCommand.spare3=0;
+    QByteArray datagram(reinterpret_cast<const char*>(&configCommand),sizeof(configCommand));
+    m_udpSocket->writeDatagram(datagram,QHostAddress::LocalHost,9999);
+}
+
+void MainWindow::v_sendFileReadCommand() {
+    QString get_FileLocation = ui->leSelectedFile->text();
+    SendCommand file_ReadCommand;
+    file_ReadCommand.messageID = 0X8553;
+    file_ReadCommand.messageCount = ++m_messageCount;
+    file_ReadCommand.commandID = 1003;
+    file_ReadCommand.spare2 = 0;
+    file_ReadCommand.spare3 = 0;
+    QByteArray datagram(reinterpret_cast<const char*>(&file_ReadCommand), sizeof(file_ReadCommand));
+    m_udpSocket->writeDatagram(datagram, QHostAddress::LocalHost,9999);
+
+    // File sending functionality
+    QFile file(get_FileLocation);
+    if (!file.open(QIODevice::ReadOnly)) {
+        v_updateLabel(ui->lbl_File_Read, 0);
+        qDebug() << "Unable to open file";
+        return;
+    }
+
+    int sequenceNumber = 0;
+    const int chunkSize = 60000;
+    QByteArray fileChunk;
+
+    while (!(fileChunk = file.read(chunkSize)).isEmpty()) {
+        QByteArray datagram;
+        QDataStream stream(&datagram, QIODevice::WriteOnly);
+
+        stream << sequenceNumber;
+        stream << fileChunk;
+
+        m_udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 9999); // Sending to the correct port
+        qDebug() << "sequenceNumber"<<sequenceNumber;
+        qDebug() << "bytes"<<fileChunk.size();
+
+
+        while (true) {
+            if (m_udpSocket->hasPendingDatagrams()) {
+                QByteArray response;
+                response.resize(m_udpSocket->pendingDatagramSize());
+                m_udpSocket->readDatagram(response.data(), response.size());
+                QDataStream responseStream(&response, QIODevice::ReadOnly);
+                int ackResponse;
+                responseStream >> ackResponse;
+                if (ackResponse == 1) {
+                    sequenceNumber++;
+                    break;
+                } else if (ackResponse == -1) {
+                    m_udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 9999);
+                }
+            }
+        }
+    }
+
+    // Send end-of-file transmission signal
+    QByteArray endSignal;
+    QDataStream endStream(&endSignal, QIODevice::WriteOnly);
+    endStream << -1; // End-of-file signal
+    m_udpSocket->writeDatagram(endSignal, QHostAddress::LocalHost, 9999); // Ensure sending to correct port
+
+    qDebug() << "File sent successfully!";
+
+}
+
+void MainWindow::v_sendErase_MemCommand()
+{
+    SendCommand Erase_MemCommand;
+    Erase_MemCommand.messageID=0X2233;
+    Erase_MemCommand.messageCount=++m_messageCount;
+    Erase_MemCommand.commandID=1004;
+    Erase_MemCommand.spare2=0;
+    Erase_MemCommand.spare3=0;
+    QByteArray datagram(reinterpret_cast<const char*>(&Erase_MemCommand),sizeof(Erase_MemCommand));
+    m_udpSocket->writeDatagram(datagram,QHostAddress::LocalHost,9999);
+}
+
+void MainWindow::v_sendProgram_FileCommand()
+{
+    SendCommand program_FileCommand;
+    program_FileCommand.messageID=0X4411;
+    program_FileCommand.messageCount=++m_messageCount;
+    program_FileCommand.commandID=1005;
+    program_FileCommand.spare2=0;
+    program_FileCommand.spare3=0;
+    QByteArray datagram(reinterpret_cast<const char*>(&program_FileCommand),sizeof(program_FileCommand));
+    m_udpSocket->writeDatagram(datagram,QHostAddress::LocalHost,9999);
+}
+
+void MainWindow::v_sendAuto_Boot_SetCommand()
+{
+    SendCommand auto_Boot_SetCommand;
+    auto_Boot_SetCommand.messageID=0X9955;
+    auto_Boot_SetCommand.messageCount=++m_messageCount;
+    auto_Boot_SetCommand.commandID=1006;
+    auto_Boot_SetCommand.spare2=0;
+    auto_Boot_SetCommand.spare3=0;
+    QByteArray datagram(reinterpret_cast<const char*>(&auto_Boot_SetCommand),sizeof(auto_Boot_SetCommand));
+    m_udpSocket->writeDatagram(datagram,QHostAddress::LocalHost,9999);
+}
+void MainWindow::v_serverRespons()
+{
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize((m_udpSocket->pendingDatagramSize()));
+        m_udpSocket->readDatagram(datagram.data(),datagram.size());
+        if(datagram.size()==sizeof(ResponseCommand))
+        {
+            ResponseCommand response;
+            std::memcpy(&response,datagram.data(),sizeof(response));
+            switch (response.commandID) {
+            case 1001:
+            {
+                bool success=(response.acknowledgementType==1);
+                v_updateLabel(ui->lbl_AliveStatus,success);
+                v_enableNextLabel(ui->tb_CONFIG);
+            }
+                break;
+            case 1002:
+            {
+                bool success=(response.acknowledgementType==1);
+                v_updateLabel(ui->lbl_Config,success);
+                v_enableNextLabel(ui->tb_FILE_READ);
+            }
+                break;
+            case 1003:
+            {
+                bool success=(response.acknowledgementType==1);
+                v_updateLabel(ui->lbl_File_Read,success);
+                v_enableNextLabel(ui->tb_ERASE_MEM);
+            }
+                break;
+            case 1004:
+            {
+                bool success=(response.acknowledgementType==1);
+                v_updateLabel(ui->lbl_Erase_Mem,success);
+                v_enableNextLabel(ui->tb_PROGRAM_FILE);
+            }
+                break;
+            case 1005:
+            {
+                bool success=(response.acknowledgementType==1);
+                  v_updateLabel(ui->lbl_Program_File,success);
+
+                v_enableNextLabel(ui->tb_AUTO_BOOT_SET);
+
+            }
+                break;
+            case 1006:
+            {
+                bool success=(response.acknowledgementType==1);
+                v_updateLabel(ui->lbl_Auto_Boot_Set,success);
+
+            }
+                break;
+            default:
+                break;
+            }
+
+        }
+
+    }
+
+}
+void MainWindow::v_updateLabel(QLabel *label,bool success)
+{
+    if(success)
+    {
+        label->setStyleSheet("background-color:green;border-radius:9px;border:1px solid #000;");
+
+    }
+    else
+    {
+        label->setStyleSheet("background-color:red;border-radius:9px;border:1px solid #000;");
+    }
+}
+
+void MainWindow::v_enableNextLabel(QToolButton *toolButton)
+{
+        toolButton->setEnabled(true);
+}
+
+void MainWindow::v_on_clickReset()
+{
+ui->lbl_AliveStatus->setStyleSheet("background-color:grey;border-radius:9px;border:1px solid #000;");
+ui->tb_CONFIG->setDisabled(true);
+ui->lbl_Config->setStyleSheet("background-color:grey;border-radius:9px;border:1px solid #000;");
+ui->tb_FILE_READ->setDisabled(true);
+ui->lbl_File_Read->setStyleSheet("background-color:grey;border-radius:9px;border:1px solid #000;");
+ui->tb_ERASE_MEM->setDisabled(true);
+ui->lbl_Erase_Mem->setStyleSheet("background-color:grey;border-radius:9px;border:1px solid #000;");
+ui->tb_PROGRAM_FILE->setDisabled(true);
+ui->lbl_Program_File->setStyleSheet("background-color:grey;border-radius:9px;border:1px solid #000;");
+ui->tb_AUTO_BOOT_SET->setDisabled(true);
+ui->lbl_Auto_Boot_Set->setStyleSheet("background-color:grey;border-radius:9px;border:1px solid #000;");
+}
+
+void MainWindow::v_on_clickQuit()
+{
+MainWindow::close();
+}
+----------------------------------------------------------------
