@@ -1,0 +1,304 @@
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QMainWindow>
+#include <QUdpSocket>
+
+QT_BEGIN_NAMESPACE
+namespace Ui {
+class MainWindow;
+}
+QT_END_NAMESPACE
+
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow();
+
+public slots:
+    void sendFile();
+
+private:
+    Ui::MainWindow *ui;
+    QUdpSocket *udpSocket;
+    int sequenceNumber;
+
+    bool sendFileName(const QString &filename);
+    bool sendFileChunk(const QByteArray &fileChunk);
+    bool logFileChunk(const QByteArray &fileChunk);
+    void sendEndOfFileSignal();
+    bool waitForAcknowledgment();
+};
+
+#endif // MAINWINDOW_H
+-------------------------------------------------------------
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include <QToolButton>
+#include <QFile>
+#include <QDataStream>
+#include <QDebug>
+#include <QFileInfo>
+#include <QThread>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent), ui(new Ui::MainWindow), sequenceNumber(0) {
+    ui->setupUi(this);
+    udpSocket = new QUdpSocket(this);
+    connect(ui->sendButton, &QToolButton::clicked, this, &MainWindow::sendFile);
+}
+
+MainWindow::~MainWindow() {
+    delete ui;
+}
+
+void MainWindow::sendFile() {
+    sequenceNumber = 0;  // Reset sequence number for the new file
+
+    QString filePath = ui->lineEdit->text();
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qDebug() << "Unable to open file";
+        return;
+    }
+
+    QString filename = QFileInfo(file).fileName();
+    if (!sendFileName(filename)) return;
+
+    const int chunkSize = 60000;
+    QByteArray fileChunk;
+
+    while (!(fileChunk = file.read(chunkSize)).isEmpty()) {
+        if (!sendFileChunk(fileChunk)) return;
+        QThread::msleep(10);  // Introduce a slight delay
+    }
+
+    sendEndOfFileSignal();
+    qDebug() << "File sent successfully!";
+}
+
+bool MainWindow::sendFileName(const QString &filename) {
+    QByteArray datagram;
+    QDataStream stream(&datagram, QIODevice::WriteOnly);
+    stream << filename;
+    udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 1234);
+
+    return waitForAcknowledgment();
+}
+
+bool MainWindow::sendFileChunk(const QByteArray &fileChunk) {
+    QByteArray datagram;
+    QDataStream stream(&datagram, QIODevice::WriteOnly);
+    stream << sequenceNumber << fileChunk;
+
+    udpSocket->writeDatagram(datagram, QHostAddress::LocalHost, 1234);
+
+    if (logFileChunk(fileChunk)) {
+        if (waitForAcknowledgment()) {
+            sequenceNumber++;
+            return true;
+        } else {
+            qDebug() << "Resending chunk with sequence number:" << sequenceNumber;
+            return sendFileChunk(fileChunk);  // Retry sending the chunk
+        }
+    }
+    return false;
+}
+
+bool MainWindow::logFileChunk(const QByteArray &fileChunk) {
+    QFile fileexe("D:/GUITestProgram/FileTransferClient/exe.txt");
+    if (!fileexe.open(QIODevice::WriteOnly | QIODevice::Append)) return false;
+
+    fileexe.write(fileChunk);
+    qDebug() << fileChunk.size();
+    qDebug() << "Sent chunk with sequence number:" << sequenceNumber;
+
+    return true;
+}
+
+void MainWindow::sendEndOfFileSignal() {
+    QByteArray endSignal;
+    QDataStream endStream(&endSignal, QIODevice::WriteOnly);
+    endStream << -1;
+    udpSocket->writeDatagram(endSignal, QHostAddress::LocalHost, 1234);
+}
+
+bool MainWindow::waitForAcknowledgment() {
+    while (true) {
+        if (udpSocket->hasPendingDatagrams()) {
+            QByteArray response;
+            response.resize(udpSocket->pendingDatagramSize());
+            udpSocket->readDatagram(response.data(), response.size());
+
+            QDataStream responseStream(&response, QIODevice::ReadOnly);
+            int ackResponse;
+            responseStream >> ackResponse;
+
+            qDebug() << "Received acknowledgment:" << ackResponse;
+
+            if (ackResponse == 1) {
+                return true;
+            } else if (ackResponse == -1) {
+                qDebug() << "Resending chunk with sequence number:" << sequenceNumber;
+                return false;
+            }
+        }
+    }
+}
+------------------------------------------------------------
+#ifndef FILETRANSFERSERVER_H
+#define FILETRANSFERSERVER_H
+
+#include <QObject>
+#include <QUdpSocket>
+#include <QFile>
+
+class FileTransferServer : public QObject
+{
+    Q_OBJECT
+public:
+    explicit FileTransferServer(QObject *parent = nullptr);
+
+private slots:
+    void v_handleCommands();
+
+private:
+    QUdpSocket *m_udpSocket;
+    int temp;
+    bool isNewFile;
+
+    bool prepareDirectory(const QString &mpath);
+    bool processFileName(QDataStream &stream, QFile &file, const QString &mpath);
+    bool processFileChunk(QDataStream &stream, QFile &file, QHostAddress sender, quint16 senderPort);
+    void finalizeFileTransfer(QFile &file);
+    void sendAcknowledgment(int status, QHostAddress &sender, quint16 senderPort);
+};
+
+#endif // FILETRANSFERSERVER_H
+-------------------------------------------------------------
+#include "filetransferserver.h"
+#include <QCoreApplication>
+#include <QFile>
+#include <QDir>
+#include <QDataStream>
+#include <QDebug>
+#include <iostream>
+
+FileTransferServer::FileTransferServer(QObject *parent) : QObject(parent), temp(0), isNewFile(true) {
+    m_udpSocket = new QUdpSocket(this);
+    if (!m_udpSocket->bind(QHostAddress::LocalHost, 1234)) {
+        qDebug() << "Failed to bind to port";
+        return;
+    }
+    connect(m_udpSocket, &QUdpSocket::readyRead, this, &FileTransferServer::v_handleCommands);
+}
+
+void FileTransferServer::v_handleCommands() {
+    static QFile file;
+    QString mpath = "D:/GUITestProgram/FileTransferServer/File_Store";
+
+    if (isNewFile) {
+        if (!prepareDirectory(mpath)) return;
+    }
+
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray buffer;
+        buffer.resize(m_udpSocket->pendingDatagramSize());
+
+        QHostAddress sender;
+        quint16 senderPort;
+        m_udpSocket->readDatagram(buffer.data(), buffer.size(), &sender, &senderPort);
+
+        QDataStream stream(&buffer, QIODevice::ReadOnly);
+        if (isNewFile) {
+            if (!processFileName(stream, file, mpath)) return;
+            sendAcknowledgment(1, sender, senderPort);
+            isNewFile = false;
+            temp = 0;  // Reset sequence number for the new file
+        } else {
+            if (!processFileChunk(stream, file, sender, senderPort)) return;
+        }
+    }
+}
+
+bool FileTransferServer::prepareDirectory(const QString &mpath) {
+    QDir dir(mpath);
+    if (dir.exists() && !dir.removeRecursively()) {
+        std::cout << "Failed to delete directory and its contents" << std::endl;
+        return false;
+    }
+
+    if (!dir.mkpath(mpath)) {
+        std::cout << "Failed to create directory" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool FileTransferServer::processFileName(QDataStream &stream, QFile &file, const QString &mpath) {
+    QString fileName;
+    stream >> fileName;
+    file.setFileName(mpath + "/" + fileName);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        std::cout << "Unable to open file for writing" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool FileTransferServer::processFileChunk(QDataStream &stream, QFile &file, QHostAddress sender, quint16 senderPort) {
+    int sequenceNumber;
+    QByteArray fileChunk;
+
+    stream >> sequenceNumber;
+
+    qDebug() << "Processing chunk with sequence number:" << sequenceNumber;
+
+    if (sequenceNumber == -1) {
+        finalizeFileTransfer(file);
+        isNewFile = true;
+        temp = 0;
+        return true;
+    }
+
+    if (sequenceNumber == temp) {
+        stream >> fileChunk;
+        qDebug() << "Chunk size:" << fileChunk.size();
+
+        if (file.write(fileChunk) == -1) {
+            qDebug() << "Failed to write chunk to file.";
+            sendAcknowledgment(-1, sender, senderPort);  // Acknowledge failure
+            return false;
+        }
+        sendAcknowledgment(1, sender, senderPort);  // Acknowledge success
+        temp++;
+    } else {
+        qDebug() << "Expected sequence number:" << temp << "but got:" << sequenceNumber;
+        sendAcknowledgment(-1, sender, senderPort);  // Acknowledge failure
+    }
+    return true;
+}
+
+void FileTransferServer::sendAcknowledgment(int status, QHostAddress &sender, quint16 senderPort) {
+    QByteArray ackResponse;
+    QDataStream ackStream(&ackResponse, QIODevice::WriteOnly);
+    ackStream << status;
+    m_udpSocket->writeDatagram(ackResponse, sender, senderPort);
+    qDebug() << "Sent acknowledgment with status:" << status << "to" << sender.toString() << ":" << senderPort;
+}
+
+void FileTransferServer::finalizeFileTransfer(QFile &file) {
+    file.close();
+    std::cout << "File received and saved successfully!" << std::endl;
+}
+
+int main(int argc, char *argv[]) {
+    QCoreApplication a(argc, argv);
+
+    FileTransferServer server;
+
+    return a.exec();
+}
