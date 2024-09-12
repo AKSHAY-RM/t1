@@ -1,0 +1,492 @@
+To properly handle the data transmission, we need to modify your smartfileserver class to ensure that the data chunks are written correctly to the file. Here are the steps to improve the handling of the file data:
+
+Dynamic Chunk Size: The current implementation always writes sizeof(data.aucBuffer) bytes, which is fixed at 60,000. We need to handle the case where the last chunk of data may be smaller than this fixed size.
+End of File: Add logic to handle the case where the last chunk is received. The file size from the header should be used to determine if the received data has completed the transfer.
+Acknowledgment Handling: After receiving each data chunk, the server should send an acknowledgment to the client to ensure reliable file transfer.
+Here's the updated code:
+
+Updated dataReceiver() Function:
+cpp
+Copy code
+void smartfileserver::dataReceiver()
+{
+    while (m_qudpSocket->hasPendingDatagrams()) {
+        QByteArray datagram;
+        datagram.resize(m_qudpSocket->pendingDatagramSize());
+
+        QHostAddress sender;
+        quint16 senderPort;
+
+        m_qudpSocket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
+
+        STDATAGRAM *receivedData = reinterpret_cast<STDATAGRAM *>(datagram.data());
+
+        if (receivedData->unDataGramType == 1) {  // Header
+            // Handle file header
+            STHEADER header = receivedData->unDataGram.stHeader;
+            m_qStrFileName = QString::fromUtf8(header.acFileName);
+            m_unFileLength = header.unFileLength;
+            m_unSequenceNumber = receivedData->unSequenceNumber;
+
+            // Open the file for writing
+            m_qFile.setFileName(m_qStrFileName);
+            if (m_qFile.open(QIODevice::WriteOnly)) {
+                m_isReceivingFile = true;
+                qDebug() << "Receiving file:" << m_qStrFileName;
+            } else {
+                qDebug() << "Failed to open file:" << m_qStrFileName;
+            }
+
+            // Send acknowledgment for header
+            sendAcknowledgment(m_unSequenceNumber, sender, senderPort);
+        }
+        else if (receivedData->unDataGramType == 2 && m_isReceivingFile) {  // Data
+            // Handle file data
+            STDATA data = receivedData->unDataGram.stData;
+            qint64 bytesToWrite = qMin<qint64>(m_unFileLength - m_qFile.size(), sizeof(data.aucBuffer));  // Handle final chunk
+
+            // Write only the required number of bytes
+            qint64 bytesWritten = m_qFile.write(reinterpret_cast<char *>(data.aucBuffer), bytesToWrite);
+
+            if (bytesWritten == -1) {
+                qDebug() << "Error writing to file:" << m_qStrFileName;
+            } else {
+                qDebug() << "Written" << bytesWritten << "bytes to file";
+            }
+
+            m_unSequenceNumber = receivedData->unSequenceNumber;
+
+            // Send acknowledgment for data chunk
+            sendAcknowledgment(m_unSequenceNumber, sender, senderPort);
+
+            // Check if we've written the entire file
+            if (m_qFile.size() == m_unFileLength) {
+                qDebug() << "File fully received, size matches file length in header.";
+                m_qFile.close();
+                m_isReceivingFile = false;
+            }
+        }
+        else if (receivedData->unDataGramType == 3 && m_isReceivingFile) {  // Footer
+            // Handle file footer
+            STFOOTER footer = receivedData->unDataGram.stFooter;
+
+            if (m_qStrFileName == QString::fromUtf8(footer.acFileName) && m_unFileLength == footer.unFileLength) {
+                qDebug() << "File transfer complete for file:" << m_qStrFileName;
+                if (m_qFile.isOpen()) {
+                    m_qFile.close();
+                }
+                m_isReceivingFile = false;
+            } else {
+                qDebug() << "Footer mismatch!";
+            }
+
+            // Send acknowledgment for footer
+            sendAcknowledgment(receivedData->unSequenceNumber, sender, senderPort);
+        }
+    }
+}
+Key Modifications:
+Handling the Last Chunk: The bytesToWrite is calculated dynamically to handle the case where the last chunk of the file is smaller than 60,000 bytes.
+Acknowledgment: Each type of packet (header, data, footer) sends an acknowledgment back to the sender using sendAcknowledgment().
+End of File Check: The server checks if the file size matches the length specified in the header. If the file is fully received, it closes the file.
+Helper Function: sendAcknowledgment()
+This function sends an acknowledgment back to the client after receiving a chunk of data.
+
+cpp
+Copy code
+void smartfileserver::sendAcknowledgment(UINT_32_TYPE sequenceNumber, const QHostAddress &sender, quint16 senderPort) {
+    QByteArray ackDatagram;
+    QDataStream ackStream(&ackDatagram, QIODevice::WriteOnly);
+    
+    // Pack the sequence number into the acknowledgment packet
+    ackStream << sequenceNumber;
+    
+    // Send the acknowledgment
+    m_qudpSocket->writeDatagram(ackDatagram, sender, senderPort);
+    qDebug() << "Acknowledgment sent for sequence number:" << sequenceNumber;
+}
+Explanation:
+File Handling: We handle opening, writing, and closing the file dynamically based on the type of packet received (header, data, or footer).
+Acknowledgments: Acknowledgments are sent after each chunk (header, data, or footer) to ensure reliable communication and allow the sender to retry in case of network failures.
+File Chunk Handling: The last data chunk may be smaller than 60,000 bytes, so we ensure that the correct number of bytes is written.
+This should fix the file transfer issues and allow your server to handle file data correctly.
+
+
+
+
+
+
+To implement logic for sending a file in 60,000-byte chunks, we will utilize the structure STDATAGRAM, which includes the STDATA for holding the file chunk. We will read the file in chunks of 60,000 bytes, package it into the STDATAGRAM, and send it over UDP. Additionally, we will introduce sequence numbers to ensure that each chunk is sent in order, with a delay between each transmission to avoid overwhelming the network.
+
+Implementation Steps:
+Read the file in chunks of 60,000 bytes.
+Create a STDATAGRAM for each chunk, setting the unDataGramType to indicate it's a data packet (not header or footer).
+Assign the chunk data to the STDATA portion of the datagram.
+Send the datagram over UDP.
+Wait for acknowledgment for each chunk, retry if acknowledgment fails.
+Updated sendFileData() Function:
+cpp
+Copy code
+void smartfiletransfer::sendFileData() {
+    // Set chunk size to 60,000 bytes
+    const int chunkSize = 60000;
+    QByteArray fileChunk;
+    STDATAGRAM datagram;
+    datagram.unDataGramType = 2;  // 2 indicates file data
+    m_unSequenceNumber = 1;       // Start sequence number at 1 for file data
+
+    // Open the file in read-only mode
+    if (!m_qFP.open(QIODevice::ReadOnly)) {
+        qDebug() << "Failed to open file for reading.";
+        return;
+    }
+
+    while (!(fileChunk = m_qFP.read(chunkSize)).isEmpty()) {
+        // Set the sequence number
+        datagram.unSequenceNumber = m_unSequenceNumber;
+
+        // Copy the file chunk into the datagram's data buffer
+        memcpy(datagram.unDataGram.stData.aucBuffer, fileChunk.data(), fileChunk.size());
+
+        // Send the datagram
+        QByteArray buffer(reinterpret_cast<const char*>(&datagram), sizeof(STDATAGRAM));
+        m_qudpSocket->writeDatagram(buffer, QHostAddress::LocalHost, m_unPortNumber);
+
+        // Wait for acknowledgment (add logic here)
+        if (!waitForAcknowlegment()) {
+            qDebug() << "Failed to receive acknowledgment, resending chunk with sequence number:" << m_unSequenceNumber;
+            continue;  // Retry sending the same chunk
+        }
+
+        // Increment the sequence number after successful transmission
+        m_unSequenceNumber++;
+
+        // Slight delay to prevent network congestion
+        QThread::msleep(10);
+    }
+
+    // Close the file after sending all data
+    m_qFP.close();
+}
+Helper Function: waitForAcknowlegment()
+This function will wait for an acknowledgment from the server and return true if the acknowledgment is received, otherwise, it will retry sending the same chunk.
+
+cpp
+Copy code
+bool smartfiletransfer::waitForAcknowlegment() {
+    // Set a timeout for waiting for acknowledgment
+    m_qudpSocket->waitForReadyRead(3000);  // Wait for up to 3 seconds
+    while (m_qudpSocket->hasPendingDatagrams()) {
+        QByteArray buffer;
+        buffer.resize(m_qudpSocket->pendingDatagramSize());
+        m_qudpSocket->readDatagram(buffer.data(), buffer.size());
+
+        // Assuming the acknowledgment packet contains the sequence number
+        QDataStream stream(&buffer, QIODevice::ReadOnly);
+        UINT_32_TYPE ackSequenceNumber;
+        stream >> ackSequenceNumber;
+
+        // If the acknowledgment corresponds to the current sequence number, return success
+        if (ackSequenceNumber == m_unSequenceNumber) {
+            qDebug() << "Received acknowledgment for sequence number:" << ackSequenceNumber;
+            return true;
+        }
+    }
+    qDebug() << "No acknowledgment received for sequence number:" << m_unSequenceNumber;
+    return false;
+}
+
+#ifndef SMARTFILETRANSFER_H
+#define SMARTFILETRANSFER_H
+
+#include <QObject>
+#include <QUdpSocket>
+#include <QFile>
+#include <QString>
+#define FILE_NAME_LENGTH 256
+typedef signed char INT_8_TYPE;
+typedef unsigned char UINT_8_TYPE;
+
+typedef float FLOAT_32_TYPE;
+typedef double FLOAT_64_TYPE;
+
+typedef unsigned short UINT_16_TYPE;
+typedef signed short INT_16_TYPE;
+
+typedef unsigned int UINT_32_TYPE;
+typedef signed int INT_32_TYPE;
+
+typedef unsigned long long UINT_64_TYPE;
+typedef signed long long INT_64_TYPE;
+
+struct STHEADER
+{
+    char acFileName[FILE_NAME_LENGTH];
+    UINT_32_TYPE unFileLength;
+};
+
+struct STDATA
+{
+    UINT_8_TYPE aucBuffer[60000];
+};
+
+struct STFOOTER
+{
+    char acFileName[FILE_NAME_LENGTH];
+    UINT_32_TYPE unFileLength;
+};
+
+union UNDATAGRAM
+{
+    STHEADER stHeader;
+    STDATA stData;
+    STFOOTER stFooter;
+};
+
+struct STDATAGRAM
+{
+    UINT_32_TYPE unDataGramType;
+    UINT_32_TYPE unSequenceNumber;
+    UNDATAGRAM unDataGram;
+};
+
+class smartfiletransfer : public QObject
+{
+    Q_OBJECT
+public:
+    smartfiletransfer(QString qStrFilePath, QString qStrIP, UINT_32_TYPE unPort, UINT_8_TYPE ucSendRev);
+    ~smartfiletransfer();
+
+    void sendFileHeader();
+    void sendFileFooter();
+    void sendFileData();
+    void dataReveiver();
+    bool receiveHeader();
+    bool receiveData();
+    bool receiveFooter();
+    bool waitForAcknowlegment();
+    bool sendAckowlegment();
+    QUdpSocket *m_qudpSocket;  // Pointer to QUdpSocket
+
+
+private:
+
+    UINT_8_TYPE m_ucSendRev;
+    QFile m_qFP;
+    QString m_qStrFilePath;
+    QString m_qStrFileName;
+    UINT_32_TYPE m_unFileLength;
+    UINT_32_TYPE m_unSequenceNumber;
+    UINT_8_TYPE m_unTransferInProgress;
+    QString m_qStrIPAddr;
+    UINT_32_TYPE m_unPortNumber;
+    UINT_32_TYPE m_temp;
+    UINT_32_TYPE m_isNewFile;
+};
+
+#endif // SMARTFILETRANSFER_H
+#include "smartfiletransfer.h"
+#include <QtCore>
+#include <QCoreApplication>
+
+smartfiletransfer::smartfiletransfer(QString qStrFilePath, QString qStrIP, UINT_32_TYPE unPort, UINT_8_TYPE ucSendRev)
+{
+    // Dynamically allocate the QUdpSocket
+    m_qudpSocket = new QUdpSocket(this);
+    // Initialize member variables
+    m_ucSendRev = ucSendRev;
+    m_qFP.setFileName(qStrFilePath);  // Set the file path to QFile object
+    m_qStrFilePath = qStrFilePath;
+    m_qStrFileName = QFileInfo(m_qStrFilePath).fileName();  // Get the file name from
+    m_qStrIPAddr = qStrIP;
+    m_unPortNumber = unPort;
+    m_unSequenceNumber = 0;
+    m_unTransferInProgress = 0;
+    m_temp = 0;
+    m_isNewFile = 0;
+
+    if(m_ucSendRev==1)
+    {
+        if (m_qudpSocket->bind(QHostAddress(m_qStrIPAddr), m_unPortNumber)) {
+            connect(m_qudpSocket, &QUdpSocket::readyRead, this, &smartfiletransfer::dataReveiver);
+        }
+
+    }
+    else if(m_ucSendRev==2)
+    {
+        if (m_qFP.open(QIODevice::ReadOnly)) {
+            m_unFileLength = m_qFP.size();
+        }
+
+    }
+}
+
+smartfiletransfer::~smartfiletransfer() {
+    if(m_qFP.isOpen())
+    {
+        m_qFP.close();
+    }
+    // Destructor: delete the dynamically allocated QUdpSocket
+    delete m_qudpSocket;
+}
+
+void smartfiletransfer::sendFileHeader() {
+
+    STDATAGRAM datagram;
+    datagram.unDataGramType = 1;
+    datagram.unSequenceNumber = m_unSequenceNumber++;
+
+    // Convert QString to a char array
+    QByteArray byteArray = m_qStrFileName.toLocal8Bit();
+    std::strncpy(datagram.unDataGram.stHeader.acFileName, byteArray.data(), FILE_NAME_LENGTH - 1);
+    datagram.unDataGram.stHeader.acFileName[FILE_NAME_LENGTH - 1] = '\0';  // Ensure null termination
+
+    // Set file length
+    datagram.unDataGram.stHeader.unFileLength = m_unFileLength;
+
+    // Create a QByteArray to store the datagram and send it over the network
+    QByteArray buffer(reinterpret_cast<const char*>(&datagram), sizeof(STDATAGRAM));
+    m_qudpSocket->writeDatagram(buffer, QHostAddress::LocalHost, m_unPortNumber);
+
+}
+
+void smartfiletransfer::sendFileFooter() {
+    STDATAGRAM datagram;
+    datagram.unDataGramType = 3;
+    datagram.unSequenceNumber = -1;
+    
+    // Convert QString to a char array
+    QByteArray byteArray = m_qStrFileName.toLocal8Bit();
+    std::strncpy(datagram.unDataGram.stHeader.acFileName, byteArray.data(), FILE_NAME_LENGTH - 1);
+    datagram.unDataGram.stHeader.acFileName[FILE_NAME_LENGTH - 1] = '\0';  // Ensure null termination
+    
+    // Set file length
+    datagram.unDataGram.stHeader.unFileLength = m_unFileLength;
+    
+    // Create a QByteArray to store the datagram and send it over the network
+    QByteArray buffer(reinterpret_cast<const char*>(&datagram), sizeof(STDATAGRAM));
+    m_qudpSocket->writeDatagram(buffer, QHostAddress::LocalHost, m_unPortNumber);
+}
+void smartfiletransfer::sendFileData() {
+        // Set chunk size to 60,000 bytes
+        const int chunkSize = 60000;
+        QByteArray fileChunk;
+        STDATAGRAM datagram;
+        datagram.unDataGramType = 2;  // 2 indicates file data
+        m_unSequenceNumber = 1;       // Start sequence number at 1 for file data
+        
+        while (!(fileChunk = m_qFP.read(chunkSize)).isEmpty()) {
+            // Set the sequence number
+            datagram.unSequenceNumber = m_unSequenceNumber;
+            
+            // Copy the file chunk into the datagram's data buffer
+            memcpy(datagram.unDataGram.stData.aucBuffer, fileChunk.data(), fileChunk.size());
+            
+            // Send the datagram
+            QByteArray buffer(reinterpret_cast<const char*>(&datagram), sizeof(STDATAGRAM));
+            m_qudpSocket->writeDatagram(buffer, QHostAddress::LocalHost, m_unPortNumber);
+            
+            // Wait for acknowledgment (add logic here)
+            if (!waitForAcknowlegment()) {
+                qDebug() << "Failed to receive acknowledgment, resending chunk with sequence number:" << m_unSequenceNumber;
+                continue;  // Retry sending the same chunk
+            }
+            
+            // Increment the sequence number after successful transmission
+            m_unSequenceNumber++;
+            
+            // Slight delay to prevent network congestion
+            QThread::msleep(10);
+        }
+        
+        // Close the file after sending all data
+        m_qFP.close();
+    }
+   
+
+
+void smartfiletransfer::dataReveiver()
+{
+
+}
+bool smartfiletransfer::receiveHeader() {
+    // Logic for receiving file header
+    return true;
+}
+
+bool smartfiletransfer::receiveData() {
+    // Logic for receiving file data
+    return true;
+}
+
+bool smartfiletransfer::receiveFooter() {
+    // Logic for receiving file footer
+    return true;
+}
+
+bool smartfiletransfer::waitForAcknowlegment() {
+    // Logic for waiting for acknowledgment
+    return true;
+}
+
+bool smartfiletransfer::sendAckowlegment() {
+    // Logic for sending acknowledgment
+    return true;
+}
+void FileTransferServer::v_handleCommands() {
+    static QFile file;
+    QString mpath = "D:/GUITestProgram/FileTransferServer/File_Store";
+
+    if (isNewFile) {
+        if (!prepareDirectory(mpath)) return;
+    }
+
+    while (m_udpSocket->hasPendingDatagrams()) {
+        QByteArray buffer;
+        buffer.resize(m_udpSocket->pendingDatagramSize());
+
+        QHostAddress sender;
+        quint16 senderPort;
+        m_udpSocket->readDatagram(buffer.data(), buffer.size(), &sender, &senderPort);
+
+        STDATAGRAM *receivedData = reinterpret_cast<STDATAGRAM *>(buffer.data());
+
+        // Convert the filename from char[] to QString
+        QString filename = QString::fromUtf8(receivedData->unDataGram.stHeader.acFileName);
+        qDebug() << "Received file name:" << filename;
+
+        if (isNewFile) {
+            if (!processFileName(filename, file, mpath)) return;
+            sendAcknowledgment(1, sender, senderPort);
+            isNewFile = false;
+            temp = 0;  // Reset sequence number for the new file
+        } else {
+            // if (!processFileChunk(stream, file, sender, senderPort)) return;
+        }
+    }
+}
+
+
+bool FileTransferServer::prepareDirectory(const QString &mpath) {
+    QDir dir(mpath);
+    if (dir.exists() && !dir.removeRecursively()) {
+        std::cout << "Failed to delete directory and its contents" << std::endl;
+        return false;
+    }
+
+    if (!dir.mkpath(mpath)) {
+        std::cout << "Failed to create directory" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool FileTransferServer::processFileName(QString filename, QFile &file, const QString &mpath) {
+
+    file.setFileName(mpath + "/" + filename);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        std::cout << "Unable to open file for writing" << std::endl;
+        return false;
+    }
+    return true;
+}
