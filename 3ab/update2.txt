@@ -1,0 +1,428 @@
+#ifndef SMARTFILETRANSFER_H
+#define SMARTFILETRANSFER_H
+
+#include <QObject>
+#include <QUdpSocket>
+#include <QFile>
+#include <QString>
+#define FILE_NAME_LENGTH 256
+typedef signed char INT_8_TYPE;
+typedef unsigned char UINT_8_TYPE;
+
+typedef float FLOAT_32_TYPE;
+typedef double FLOAT_64_TYPE;
+
+typedef unsigned short UINT_16_TYPE;
+typedef signed short INT_16_TYPE;
+
+typedef unsigned int UINT_32_TYPE;
+typedef signed int INT_32_TYPE;
+
+typedef unsigned long long UINT_64_TYPE;
+typedef signed long long INT_64_TYPE;
+
+struct STHEADER
+{
+    char acFileName[FILE_NAME_LENGTH];
+    UINT_32_TYPE unFileLength;
+};
+
+struct STDATA
+{
+    UINT_8_TYPE aucBuffer[60000];
+};
+
+struct STFOOTER
+{
+    char acFileName[FILE_NAME_LENGTH];
+    UINT_32_TYPE unFileLength;
+};
+
+union UNDATAGRAM
+{
+    STHEADER stHeader;
+    STDATA stData;
+    STFOOTER stFooter;
+};
+
+struct STDATAGRAM
+{
+    UINT_32_TYPE unDataGramType;
+    UINT_32_TYPE unSequenceNumber;
+    UNDATAGRAM unDataGram;
+};
+
+class smartfiletransfer : public QObject
+{
+    Q_OBJECT
+public:
+    smartfiletransfer(QString qStrFilePath, QString qStrIP, UINT_32_TYPE unPort, UINT_8_TYPE ucSendRev);
+    ~smartfiletransfer();
+
+    void sendFileHeader();
+    void sendFileFooter();
+    void sendFileData();
+    bool waitForAcknowledgment();
+
+    QUdpSocket *m_qudpSocket;  // Pointer to QUdpSocket
+
+
+private:
+
+    UINT_8_TYPE m_ucSendRev;
+    QFile m_qFP;
+    QString m_qStrFilePath;
+    QString m_qStrFileName;
+    UINT_32_TYPE m_unFileLength;
+    UINT_32_TYPE m_unSequenceNumber;
+    UINT_8_TYPE m_unTransferInProgress;
+    QString m_qStrIPAddr;
+    UINT_32_TYPE m_unPortNumber;
+    UINT_32_TYPE m_temp;
+    UINT_32_TYPE m_isNewFile;
+};
+
+#endif // SMARTFILETRANSFER_H
+-------------------
+#include "smartfiletransfer.h"
+#include <QtCore>
+#include <QCoreApplication>
+#include <iostream>
+
+smartfiletransfer::smartfiletransfer(QString qStrFilePath, QString qStrIP, UINT_32_TYPE unPort, UINT_8_TYPE ucSendRev) {
+    m_qudpSocket = new QUdpSocket(this);
+    m_ucSendRev = ucSendRev;
+    m_qFP.setFileName(qStrFilePath);  // Set the file path to QFile object
+    m_qStrFilePath = qStrFilePath;
+    m_qStrFileName = QFileInfo(m_qStrFilePath).fileName();  // Get the file name
+    m_qStrIPAddr = qStrIP;
+    m_unPortNumber = unPort;
+    m_unSequenceNumber = 0;
+    m_unTransferInProgress = 0;
+    m_temp = 0;
+    m_isNewFile = 0;
+
+    if(m_ucSendRev == 1) {
+        if (m_qudpSocket->bind(QHostAddress::LocalHost, m_unPortNumber)) {
+            //connect(m_qudpSocket, &QUdpSocket::readyRead, this, &smartfiletransfer::dataReveiver);
+        }
+    } else if(m_ucSendRev == 2) {
+        if (m_qFP.open(QIODevice::ReadOnly)) {
+            m_qStrFileName = QFileInfo(m_qStrFilePath).fileName();  // Get the file name
+            m_unFileLength = m_qFP.size();
+        }
+    }
+}
+
+smartfiletransfer::~smartfiletransfer() {
+    if(m_qFP.isOpen()) {
+        m_qFP.close();
+    }
+    delete m_qudpSocket;
+}
+
+void smartfiletransfer::sendFileHeader() {
+    STDATAGRAM datagram;
+    datagram.unDataGramType = 1;  // Header type
+    datagram.unSequenceNumber = m_unSequenceNumber++;
+
+    // Convert QString to a char array
+    QByteArray byteArray = m_qStrFileName.toLocal8Bit();
+    std::strncpy(datagram.unDataGram.stHeader.acFileName, byteArray.data(), FILE_NAME_LENGTH - 1);
+    datagram.unDataGram.stHeader.acFileName[FILE_NAME_LENGTH - 1] = '\0';  // Ensure null termination
+    datagram.unDataGram.stHeader.unFileLength = m_unFileLength;
+
+    QByteArray buffer(reinterpret_cast<const char*>(&datagram), sizeof(STDATAGRAM));
+    m_qudpSocket->writeDatagram(buffer, QHostAddress::LocalHost, m_unPortNumber);
+}
+
+void smartfiletransfer::sendFileData() {
+    const int chunkSize = 60000;
+    QByteArray fileChunk;
+    STDATAGRAM datagram;
+    datagram.unDataGramType = 2;  // Data type
+    m_unSequenceNumber = 1;
+
+    while (!(fileChunk = m_qFP.read(chunkSize)).isEmpty()) {
+        datagram.unSequenceNumber = m_unSequenceNumber;
+
+        memcpy(datagram.unDataGram.stData.aucBuffer, fileChunk.data(), fileChunk.size());
+
+        QByteArray buffer(reinterpret_cast<const char*>(&datagram), sizeof(STDATAGRAM));
+        m_qudpSocket->writeDatagram(buffer, QHostAddress::LocalHost, m_unPortNumber);
+
+        if (!waitForAcknowledgment()) {
+            qDebug() << "Failed to receive acknowledgment, resending chunk with sequence number:" << m_unSequenceNumber;
+            continue;
+        }
+
+        m_unSequenceNumber++;
+        QThread::msleep(10);
+    }
+
+    m_qFP.close();
+}
+
+void smartfiletransfer::sendFileFooter() {
+    STDATAGRAM datagram;
+    datagram.unDataGramType = 3;  // Footer type
+    datagram.unSequenceNumber = -1;
+
+    QByteArray byteArray = m_qStrFileName.toLocal8Bit();
+    std::strncpy(datagram.unDataGram.stFooter.acFileName, byteArray.data(), FILE_NAME_LENGTH - 1);
+    datagram.unDataGram.stFooter.acFileName[FILE_NAME_LENGTH - 1] = '\0';
+    datagram.unDataGram.stFooter.unFileLength = m_unFileLength;
+
+    QByteArray buffer(reinterpret_cast<const char*>(&datagram), sizeof(STDATAGRAM));
+    m_qudpSocket->writeDatagram(buffer, QHostAddress::LocalHost, m_unPortNumber);
+}
+
+bool smartfiletransfer::waitForAcknowledgment() {
+    QEventLoop loop;
+    QTimer timer;
+    bool ackReceived = false;
+
+    connect(&timer, &QTimer::timeout, [&]() {
+        if (m_qudpSocket->hasPendingDatagrams()) {
+            QByteArray response;
+            response.resize(m_qudpSocket->pendingDatagramSize());
+            m_qudpSocket->readDatagram(response.data(), response.size());
+            QDataStream responseStream(&response, QIODevice::ReadOnly);
+            int ackrespose;
+            responseStream >> ackrespose;
+            std::cout << "Received Acknowledgment: " << ackrespose << std::endl;
+
+            if (ackrespose == 1) {
+                ackReceived = true;
+                loop.exit();
+            }
+        }
+    });
+
+    timer.start(50);
+    loop.exec();
+    return ackReceived;
+}
+---------------------------
+#ifndef SERVERSMARTFILETRASFER_H
+#define SERVERSMARTFILETRASFER_H
+
+#include <QObject>
+#include <QUdpSocket>
+#include <QFile>
+#include <QString>
+#define FILE_NAME_LENGTH 256
+typedef signed char INT_8_TYPE;
+typedef unsigned char UINT_8_TYPE;
+
+typedef float FLOAT_32_TYPE;
+typedef double FLOAT_64_TYPE;
+
+typedef unsigned short UINT_16_TYPE;
+typedef signed short INT_16_TYPE;
+
+typedef unsigned int UINT_32_TYPE;
+typedef signed int INT_32_TYPE;
+
+typedef unsigned long long UINT_64_TYPE;
+typedef signed long long INT_64_TYPE;
+
+struct STHEADER
+{
+    char acFileName[FILE_NAME_LENGTH];
+    UINT_32_TYPE unFileLength;
+};
+
+struct STDATA
+{
+    UINT_8_TYPE aucBuffer[60000];
+};
+
+struct STFOOTER
+{
+    char acFileName[FILE_NAME_LENGTH];
+    UINT_32_TYPE unFileLength;
+};
+
+union UNDATAGRAM
+{
+    STHEADER stHeader;
+    STDATA stData;
+    STFOOTER stFooter;
+};
+
+struct STDATAGRAM
+{
+    UINT_32_TYPE unDataGramType;
+    UINT_32_TYPE unSequenceNumber;
+    UNDATAGRAM unDataGram;
+};
+
+class ServerSmartFileTrasfer : public QObject
+{
+    Q_OBJECT
+public:
+    ServerSmartFileTrasfer(QString qStrFilePath, QString qStrIP, UINT_32_TYPE unPort, UINT_8_TYPE ucSendRev);
+    ~ServerSmartFileTrasfer();
+
+    bool receiveHeader();
+    bool receiveData(UINT_8_TYPE *data);
+    bool receiveFooter(STFOOTER footer);
+    void sendAcknowledgment(int status, QHostAddress &sender, quint16 senderPort);
+    QUdpSocket *m_qudpSocket;  // Pointer to QUdpSocket
+
+private slots:
+    // Slot to receive incoming datagrams
+    void dataReveiver();
+private:
+
+    UINT_8_TYPE m_ucSendRev;
+    QFile m_qFP;
+    QString m_qStrFilePath;
+    QString m_qStrFileName;
+    UINT_32_TYPE m_unFileLength;
+    UINT_32_TYPE m_unSequenceNumber;
+    UINT_8_TYPE m_unTransferInProgress;
+    QString m_qStrIPAddr;
+    UINT_32_TYPE m_unPortNumber;
+    UINT_32_TYPE m_temp;
+    UINT_32_TYPE m_isNewFile;
+    UINT_8_TYPE m_isReceivingFile;
+};
+
+
+#endif // SERVERSMARTFILETRASFER_H
+---------------------------------------
+#include "serversmartfiletrasfer.h"
+#include <QtCore>
+#include <QCoreApplication>
+#include <QFileInfo>
+#include <iostream>
+
+ServerSmartFileTrasfer::ServerSmartFileTrasfer(QString qStrFilePath, QString qStrIP, UINT_32_TYPE unPort, UINT_8_TYPE ucSendRev) {
+    m_qudpSocket = new QUdpSocket(this);
+    m_ucSendRev = ucSendRev;
+    m_qFP.setFileName(qStrFilePath);  // Set the file path to QFile object
+    m_qStrFilePath = qStrFilePath;
+    m_qStrFileName = QFileInfo(m_qStrFilePath).fileName();  // Get the file name
+    m_qStrIPAddr = qStrIP;
+    m_unPortNumber = unPort;
+    m_unSequenceNumber = 0;
+    m_unTransferInProgress = 0;
+    m_temp = 0;
+    m_isNewFile = 0;
+
+    if (m_ucSendRev == 1) {
+        std::cout<<"1"<<std::endl;
+        if (m_qudpSocket->bind(QHostAddress::LocalHost, m_unPortNumber)) {
+             std::cout<<"2"<<std::endl;
+            connect(m_qudpSocket, &QUdpSocket::readyRead, this, &ServerSmartFileTrasfer::dataReveiver);
+              std::cout<<"3"<<std::endl;
+        }
+    }
+}
+
+ServerSmartFileTrasfer::~ServerSmartFileTrasfer() {
+    if (m_qFP.isOpen()) {
+        m_qFP.close();
+    }
+    delete m_qudpSocket;
+}
+
+void ServerSmartFileTrasfer::dataReveiver() {
+    while (m_qudpSocket->hasPendingDatagrams()) {
+         std::cout<<"4"<<std::endl;
+        QByteArray datagram;
+        datagram.resize(m_qudpSocket->pendingDatagramSize());
+
+        QHostAddress sender;
+        quint16 senderPort;
+        m_qudpSocket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
+ std::cout<<"5"<<std::endl;
+        STDATAGRAM *receivedData = reinterpret_cast<STDATAGRAM *>(datagram.data());
+
+        if (receivedData->unDataGramType == 1) {
+            // Handle file header
+             std::cout<<"6"<<std::endl;
+            STHEADER header = receivedData->unDataGram.stHeader;
+            m_qStrFileName = QString::fromUtf8(header.acFileName);
+            m_unFileLength = header.unFileLength;
+
+            if (!receiveHeader()) {
+                sendAcknowledgment(-1, sender, senderPort);
+                return;
+            }
+            sendAcknowledgment(1, sender, senderPort);
+             std::cout<<"9"<<std::endl;
+        }
+        else if (receivedData->unDataGramType == 2) {
+            // Handle file data
+            std::cout<<"9"<<std::endl;
+            if (!receiveData(receivedData->unDataGram.stData.aucBuffer)) {
+                sendAcknowledgment(-1, sender, senderPort);
+                return;
+            }
+            sendAcknowledgment(1, sender, senderPort);
+            std::cout<<"12"<<std::endl;
+        }
+        else if (receivedData->unDataGramType == 3) {
+            // Handle file footer
+            STFOOTER footer = receivedData->unDataGram.stFooter;
+            if (!receiveFooter(footer)) {
+                sendAcknowledgment(-1, sender, senderPort);
+                return;
+            }
+            sendAcknowledgment(1, sender, senderPort);
+        }
+    }
+}
+
+bool ServerSmartFileTrasfer::receiveHeader() {
+     std::cout<<"7"<<std::endl;
+    QDir dir(m_qStrFilePath);
+    if (dir.exists() && !dir.removeRecursively()) {
+        std::cout << "Failed to delete directory and its contents" << std::endl;
+        return false;
+    }
+
+    if (!dir.mkpath(m_qStrFilePath)) {
+        std::cout << "Failed to create directory" << std::endl;
+        return false;
+    }
+    m_qFP.setFileName(m_qStrFilePath + "/" + m_qStrFileName);
+    if (!m_qFP.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        std::cout << "Unable to open file for writing" << std::endl;
+        return false;
+    }
+     std::cout<<"8"<<std::endl;
+    return true;
+}
+
+bool ServerSmartFileTrasfer::receiveData(UINT_8_TYPE *data) {
+    std::cout<<"10"<<std::endl;
+    m_qFP.write(reinterpret_cast<char *>(data), qstrlen(reinterpret_cast<char *>(data)));  // Cast to char* before writing
+    return true;
+    std::cout<<"11"<<std::endl;
+}
+
+
+bool ServerSmartFileTrasfer::receiveFooter(STFOOTER footer) {
+    if (footer.unFileLength != m_qFP.size()) {
+        std::cout << "Received file size doesn't match!"<<std::endl;
+        return false;
+    }
+
+    m_qFP.close();
+    return true;
+}
+
+void ServerSmartFileTrasfer::sendAcknowledgment(int status, QHostAddress &sender, quint16 senderPort) {
+    QByteArray ackResponse;
+    QDataStream ackStream(&ackResponse, QIODevice::WriteOnly);
+    ackStream << status;
+    m_qudpSocket->writeDatagram(ackResponse, sender, senderPort);
+    std::cout << "Sent acknowledgment with status: " << status
+              << " to " << sender.toString().toStdString()
+              << ":" << senderPort << std::endl;
+}
+
