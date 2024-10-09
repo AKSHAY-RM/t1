@@ -1,10 +1,13 @@
-To ensure the functionality of your file transfer project using UDP in Qt, I've reviewed your code and made some modifications for improvements and to resolve potential issues. Here’s the modified code for the ClientServerFileTransfer, MainWindow, and serverside classes:
+/*--------------------------------------------------------------------------
+ *  Filename	:	clinetserverfiletransfer.cpp
+ * 	Author		:	Akshay R M
+ *	Purpose		:	This file contains a class definition for handling
+ *                  client-server file transfers using UDP sockets.
+ *	System		:	Client-Server Communication System
+ *	Module 		: 	File Transfer Module
+ *	Create date	:	12/09/24
+ ----------------------------------------------------------------------------*/
 
-1. ClientServerFileTransfer.cpp
-Here’s the modified ClientServerFileTransfer.cpp file:
-
-cpp
-Copy code
 #include "clientserverfiletransfer.h"
 #include <QCoreApplication>
 #include <QDir>
@@ -12,48 +15,57 @@ Copy code
 #include <QDataStream>
 #include <QThread>
 #include <QFileInfo>
-#include <QDebug>
 
-ClientServerFileTransfer::ClientServerFileTransfer(QString qStrFilePath, QString qStrIP, UINT_32_TYPE unPort)
-{
-    m_qUDPSocket = new QUdpSocket();
-    m_qStrFilePath = qStrFilePath;
-    m_qStrFileName = QFileInfo(m_qStrFilePath).fileName();
-    m_qStrIPAddr = qStrIP;
-    m_unPortNumber = unPort;
-    m_unSequenceNumber = 0;
+/*--------------------------------------------------------------------
+ * Purpose : Constructor for ClientServerFileTransfer class.
+ *           Initializes the object with file path, IP address,
+ *           port number, and send/receive mode. Sets up the UDP
+ *           socket for data transfer.
+ * Return :  None
+--------------------------------------------------------------------- */
+ClientServerFileTransfer::ClientServerFileTransfer(QString qStrFilePath, QString qStrIP, UINT_32_TYPE unPort, UINT_8_TYPE ucSendRcv)
+    : m_qStrFilePath(qStrFilePath), m_qStrIPAddr(qStrIP), m_unPortNumber(unPort), m_ucSendRcv(ucSendRcv), m_unSequenceNumber(0), m_untemp(1) {
+    
+    m_qUDPSocket = new QUdpSocket(this); // Set parent to manage memory better
 
-    m_qFP.setFileName(m_qStrFilePath);
-    if (m_qFP.open(QIODevice::ReadOnly)) {
-        m_unFileLength = m_qFP.size();
-    } else {
-        qDebug() << "Failed to open file for reading.";
+    if (ucSendRcv == 1) { // Receiver binding
+        if (m_qUDPSocket->bind(QHostAddress::LocalHost, m_unPortNumber)) {
+            // Connect signal for data reception
+            connect(m_qUDPSocket, &QUdpSocket::readyRead, this, &ClientServerFileTransfer::v_DataReception);
+        } else {
+            qDebug() << "Failed to bind UDP socket for receiving." ;
+        }
+    } else if (ucSendRcv == 2) { // Sender mode
+        m_qFP.setFileName(m_qStrFilePath);
+        if (m_qFP.open(QIODevice::ReadOnly)) {
+            m_unFileLength = m_qFP.size();
+        } else {
+            qDebug() << "Failed to open file for reading: " << m_qStrFilePath;
+        }
     }
 }
 
-ClientServerFileTransfer::ClientServerFileTransfer(QString qStrFilePath, QUdpSocket *Socket)
-{
-    m_qUDPSocket = Socket;
-    m_qStrFilePath = qStrFilePath;
-    m_qStrFileName = QFileInfo(m_qStrFilePath).fileName();
-    m_untemp = 1;
-
-    qDebug() << "bind to " << m_qUDPSocket->localAddress() << m_qUDPSocket->localPort();
-    connect(m_qUDPSocket, &QUdpSocket::readyRead, this, &ClientServerFileTransfer::v_DataReception);
-}
-
-ClientServerFileTransfer::~ClientServerFileTransfer()
-{
+/*--------------------------------------------------------------------
+ *	Purpose	: Destructor for ClientServerFileTransfer class.
+ *            Releases system resources ,closes file handles and socket.
+ *	Return  : None
+ --------------------------------------------------------------------- */
+ClientServerFileTransfer::~ClientServerFileTransfer() {
+    // Close the file if it's currently open
     if (m_qFP.isOpen()) {
         m_qFP.close();
     }
-    delete m_qUDPSocket;
 }
 
+/*--------------------------------------------------------------------
+ *	Purpose	: Sends a file header packet to the receiver.
+ *	Return  : None.
+ --------------------------------------------------------------------- */
 void ClientServerFileTransfer::v_SendFileHeader() {
     STDATAGRAM stHeaderDatagram;
     stHeaderDatagram.unDataGramType = 1; // Header
     stHeaderDatagram.unSequenceNumber = m_unSequenceNumber++;
+
     QByteArray qBaFileName = m_qStrFileName.toLocal8Bit();
     strncpy((char*)stHeaderDatagram.unDataGram.stHeader.aucFileName, qBaFileName.data(), file_Name_Length - 1);
     stHeaderDatagram.unDataGram.stHeader.aucFileName[file_Name_Length - 1] = '\0';
@@ -63,10 +75,16 @@ void ClientServerFileTransfer::v_SendFileHeader() {
     m_qUDPSocket->writeDatagram(qBaBuffer, QHostAddress::LocalHost, m_unPortNumber);
 }
 
+/*--------------------------------------------------------------------
+ *	Purpose	: Sends a file footer packet to the receiver,
+ *            indicating the end of the file transfer.
+ *	Return  : None.
+ --------------------------------------------------------------------- */
 void ClientServerFileTransfer::v_SendFileFooter() {
     STDATAGRAM stFooterDatagram;
     stFooterDatagram.unDataGramType = 3; // Footer
-    stFooterDatagram.unSequenceNumber = -1;
+    stFooterDatagram.unSequenceNumber = -1; // End of transfer
+
     QByteArray qBaFileName = m_qStrFileName.toLocal8Bit();
     strncpy((char*)stFooterDatagram.unDataGram.stFooter.aucFileName, qBaFileName.data(), file_Name_Length - 1);
     stFooterDatagram.unDataGram.stFooter.aucFileName[file_Name_Length - 1] = '\0';
@@ -76,31 +94,37 @@ void ClientServerFileTransfer::v_SendFileFooter() {
     m_qUDPSocket->writeDatagram(qBaBuffer, QHostAddress::LocalHost, m_unPortNumber);
 }
 
+/*--------------------------------------------------------------------
+ *	Purpose	: Sends file data over UDP socket.
+ *            Breaks down file into chunks, sends each chunk with sequence number,
+ *            and waits for acknowledgment before sending next chunk.
+ *	Return  : None
+ --------------------------------------------------------------------- */
 void ClientServerFileTransfer::v_SendFileData() {
-    const UINT_32_TYPE unChunkSize = 60000;
+    const UINT_32_TYPE unChunkSize = 60000; // Size of each chunk
     QByteArray qBafileChunk;
     STDATAGRAM stFiledatagram;
-    stFiledatagram.unDataGramType = 2;
-    m_unSequenceNumber = 1;
+    stFiledatagram.unDataGramType = 2; // File data type
+    m_unSequenceNumber = 1; // Reset sequence number
 
     qDebug() << "Total size of file to be sent to server: " << m_qFP.size();
 
     while (!(qBafileChunk = m_qFP.read(unChunkSize)).isEmpty()) {
         stFiledatagram.unSequenceNumber = m_unSequenceNumber;
         qDebug() << "Processing chunk with sequence number:" << m_unSequenceNumber;
+
         memcpy(stFiledatagram.unDataGram.stData.aucBuffer, qBafileChunk.data(), qBafileChunk.size());
         stFiledatagram.unDataGram.stData.unSize = qBafileChunk.size();
-
-        qDebug() << "Sent chunk size to server: " << qBafileChunk.size();
         QByteArray qBaBuffer(reinterpret_cast<const char*>(&stFiledatagram), sizeof(STDATAGRAM));
 
         while (true) {
             m_qUDPSocket->writeDatagram(qBaBuffer, QHostAddress::LocalHost, m_unPortNumber);
-            QThread::msleep(2000); // wait before checking for acknowledgment
+            QThread::msleep(100); // Sleep before checking for acknowledgment
+
             if (b_WaitForAcknowledgment()) {
-                qDebug() << "Chunk with sequence number:" << m_unSequenceNumber << " successfully sent and acknowledged by server.";
+                qDebug() << "Chunk with sequence number:" << m_unSequenceNumber << " successfully sent.";
                 m_unSequenceNumber++;
-                break;
+                break; // Proceed to the next chunk
             } else {
                 qDebug() << "Error sending chunk with sequence number:" << m_unSequenceNumber << ". Retrying...";
             }
@@ -108,303 +132,144 @@ void ClientServerFileTransfer::v_SendFileData() {
     }
 }
 
-void ClientServerFileTransfer::v_DataReception()
-{
-    while (m_qUDPSocket->hasPendingDatagrams()) {
-        QByteArray qBaBuffer;
-        qBaBuffer.resize(m_qUDPSocket->pendingDatagramSize());
-        INT_64_TYPE bytesRead = m_qUDPSocket->readDatagram(qBaBuffer.data(), qBaBuffer.size(), &m_qsender, &m_qunsenderPort);
-
-        if (bytesRead == -1) {
-            qDebug() << "Error reading datagram.";
-            continue; // or return
-        }
-
-        STDATAGRAM* stReceiverData = reinterpret_cast<STDATAGRAM*>(qBaBuffer.data());
-        switch (stReceiverData->unDataGramType) {
-            case 1:
-                b_RcvFileHeader(stReceiverData);
-                break;
-
-            case 2:
-                b_RcvFileData(stReceiverData);
-                break;
-
-            case 3:
-                b_RcvFileFooter(stReceiverData);
-                qDebug() << "Final file size: " << m_qFP.size();
-                break;
-
-            default:
-                // Unknown datagram type, do nothing
-                break;
-        }
-    }
-}
-
-bool ClientServerFileTransfer::b_RcvFileHeader(STDATAGRAM* stReceiverData) {
-    QString qStrFileFolderName = m_qStrFilePath;
-    QString qStrFileName = QString::fromUtf8((const char*)stReceiverData->unDataGram.stHeader.aucFileName);
-    
-    QDir dir(qStrFileFolderName);
-    if (dir.exists()) {
-        dir.removeRecursively(); // Clean up previous files
-    }
-
-    if (!dir.mkpath(qStrFileFolderName)) {
-        qDebug() << "Failed to create directory";
-        return false; // Return false on failure
-    }
-
-    m_qFP.setFileName(qStrFileFolderName + "/" + qStrFileName);
-    if (!m_qFP.open(QIODevice::WriteOnly | QIODevice::Append)) {
-        qDebug() << "Unable to open file for writing";
-        return false; // Return false on failure
-    }
-
-    return true;
-}
-
-bool ClientServerFileTransfer::b_RcvFileData(STDATAGRAM* stReceiverData)
-{
-    UINT_32_TYPE unSequenceNumber = stReceiverData->unSequenceNumber;
-    qDebug() << "Received sequence number from client: " << unSequenceNumber;
-
-    if (unSequenceNumber == m_untemp) {
-        UINT_32_TYPE unBufferSize = stReceiverData->unDataGram.stData.unSize;
-        qint64 bytesWritten = m_qFP.write(reinterpret_cast<char*>(stReceiverData->unDataGram.stData.aucBuffer), unBufferSize);
-
-        if (bytesWritten != unBufferSize) {
-            qDebug() << "Error writing to file.";
-            v_SendAcknowledgment(-1, m_qsender, m_qunsenderPort);  // Acknowledge failure
-            return false;
-        }
-
-        m_untemp++;
-        v_SendAcknowledgment(1, m_qsender, m_qunsenderPort);
-    } else if (unSequenceNumber < m_untemp) {
-        qDebug() << "Duplicate packet received. Ignoring...";
-        v_SendAcknowledgment(1, m_qsender, m_qunsenderPort);
-    } else {
-        qDebug() << "Expected sequence number: " << m_untemp << " but got: " << unSequenceNumber;
-        v_SendAcknowledgment(-1, m_qsender, m_qunsenderPort);  // Acknowledge failure
-    }
-
-    return true;
-}
-
-bool ClientServerFileTransfer::b_RcvFileFooter(STDATAGRAM* stReceiverData) {
-    QString qStrFileName = QString::fromLocal8Bit((const char*)stReceiverData->unDataGram.stFooter.aucFileName);
-    UINT_32_TYPE unFileLength = stReceiverData->unDataGram.stHeader.unFileLength;
-    INT_64_TYPE fileSize = m_qFP.size();
-
-    if (fileSize != unFileLength) {
-        qDebug() << "File size mismatch. Expected: " << unFileLength << " but got: " << fileSize;
-        return false;
-    }
-
-    m_qFP.close();
-    qDebug() << "File transfer completed successfully.";
-    return true;
-}
-
-bool ClientServerFileTransfer::b_WaitForAcknowledgment() {
-    // Implement a timeout mechanism for waiting for acknowledgment
-    QTimer timer;
-    timer.setSingleShot(true);
-    timer.start(5000); // 5 seconds timeout
-
+/*--------------------------------------------------------------------
+ * Purpose	: Receives data from the sender and processes it accordingly.
+ *            This function runs in an infinite loop, continuously checking
+ *            for incoming datagrams.
+ * Return    : None
+ *--------------------------------------------------------------------- */
+void ClientServerFileTransfer::v_DataReception() {
     while (true) {
         if (m_qUDPSocket->hasPendingDatagrams()) {
             QByteArray qBaBuffer;
             qBaBuffer.resize(m_qUDPSocket->pendingDatagramSize());
-            m_qUDPSocket->readDatagram(qBaBuffer.data(), qBaBuffer.size());
-            STDATAGRAM* stAckData = reinterpret_cast<STDATAGRAM*>(qBaBuffer.data());
+            INT_64_TYPE bytesRead = m_qUDPSocket->readDatagram(qBaBuffer.data(), qBaBuffer.size(), &m_qsender, &m_qunsenderPort);
 
-            if (stAckData->unDataGramType == 4) { // Acknowledgment type
-                return stAckData->unDataGram.stAck.unAck == 1;
+            if (bytesRead == -1) {
+                qDebug() << "Error reading datagram.";
+                continue; // Retry reading
             }
-        }
 
-        if (timer.isTimeout()) {
-            qDebug() << "Acknowledgment not received in time.";
-            return false;
-        }
-    }
-}
-
-void ClientServerFileTransfer::v_SendAcknowledgment(int ack, QHostAddress sender, quint16 senderPort) {
-    STDATAGRAM stAckData;
-    stAckData.unDataGramType = 4; // Acknowledgment type
-    stAckData.unDataGram.stAck.unAck = ack;
-
-    QByteArray qBaBuffer(reinterpret_cast<const char*>(&stAckData), sizeof(STDATAGRAM));
-    m_qUDPSocket->writeDatagram(qBaBuffer, sender, senderPort);
-}
-2. MainWindow.cpp
-Here’s the modified MainWindow.cpp file to integrate with the GUI:
-
-cpp
-Copy code
-#include "mainwindow.h"
-#include "ui_mainwindow.h"
-#include "clientserverfiletransfer.h"
-
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent),
-      ui(new Ui::MainWindow)
-{
-    ui->setupUi(this);
-    connect(ui->pbBrowseFile, &QPushButton::clicked, this, &MainWindow::onBrowseFile);
-    connect(ui->pbSendFile, &QPushButton::clicked, this, &MainWindow::onSendFile);
-}
-
-MainWindow::~MainWindow()
-{
-    delete ui;
-}
-
-void MainWindow::onBrowseFile() {
-    QString filePath = QFileDialog::getOpenFileName(this, "Select File", "", "All Files (*)");
-    if (!filePath.isEmpty()) {
-        ui->lineEditFilePath->setText(filePath);
-    }
-}
-
-void MainWindow::onSendFile() {
-    QString filePath = ui->lineEditFilePath->text();
-    QString serverIP = "127.0.0.1"; // Change as needed
-    quint16 serverPort = 1234; // Change as needed
-
-    ClientServerFileTransfer* fileTransfer = new ClientServerFileTransfer(filePath, serverIP, serverPort);
-    fileTransfer->v_SendFileHeader();
-    fileTransfer->v_SendFileData();
-    fileTransfer->v_SendFileFooter();
-
-    delete fileTransfer; // Clean up
-}
-3. Server-side Implementation
-Here’s an outline for the server-side handling that matches the UDP communication and file transfer logic:
-
-cpp
-Copy code
-#include <QUdpSocket>
-#include <QFile>
-#include <QDir>
-#include <QDataStream>
-#include <QDebug>
-
-class FileReceiver {
-public:
-    FileReceiver(quint16 port);
-    void start();
-
-private:
-    void processPendingDatagrams();
-    bool handleReceivedData(const QByteArray& data);
-
-    QUdpSocket *m_socket;
-    QFile m_file;
-    QString m_fileName;
-    quint32 m_expectedSeqNum;
-    QHostAddress m_senderAddress;
-    quint16 m_senderPort;
-
-    // Add any other necessary member variables here
-};
-
-FileReceiver::FileReceiver(quint16 port) {
-    m_socket = new QUdpSocket();
-    m_socket->bind(port);
-    connect(m_socket, &QUdpSocket::readyRead, this, &FileReceiver::processPendingDatagrams);
-    m_expectedSeqNum = 1;
-}
-
-void FileReceiver::start() {
-    qDebug() << "Server is ready to receive files...";
-}
-
-void FileReceiver::processPendingDatagrams() {
-    while (m_socket->hasPendingDatagrams()) {
-        QByteArray buffer;
-        buffer.resize(m_socket->pendingDatagramSize());
-        m_socket->readDatagram(buffer.data(), buffer.size(), &m_senderAddress, &m_senderPort);
-
-        if (!handleReceivedData(buffer)) {
-            qDebug() << "Failed to handle received data.";
+            STDATAGRAM* stReceiverData = reinterpret_cast<STDATAGRAM*>(qBaBuffer.data());
+            switch (stReceiverData->unDataGramType) {
+                case 1: // File Header
+                    b_RcvFileHeader(stReceiverData);
+                    break;
+                case 2: // File Data
+                    b_RcvFileData(stReceiverData);
+                    break;
+                case 3: // File Footer
+                    b_RcvFileFooter(stReceiverData);
+                    qDebug() << "Final file size: " << m_qFP.size();
+                    return; // End reception loop
+                default:
+                    qDebug() << "Unknown datagram type received." ;
+                    break;
+            }
+        } else {
+            QThread::msleep(10); // Sleep briefly to avoid busy waiting
         }
     }
 }
 
-bool FileReceiver::handleReceivedData(const QByteArray& data) {
-    STDATAGRAM* packet = reinterpret_cast<STDATAGRAM*>(data.data());
-    
-    switch (packet->unDataGramType) {
-        case 1: // Header
-            m_fileName = QString::fromUtf8((const char*)packet->unDataGram.stHeader.aucFileName);
-            m_file.setFileName(m_fileName);
+/*--------------------------------------------------------------------
+ *	Purpose	: Receives a file header datagram and processes it accordingly.
+ *              This function creates the directory and file for receiving the file data.
+ *--------------------------------------------------------------------- */
+bool ClientServerFileTransfer::b_RcvFileHeader(STDATAGRAM* stReceiverData) {
+    QString qStrFileFolderName = m_qStrFilePath;
+    QString qStrFileName = QString::fromUtf8((const char*)stReceiverData->unDataGram.stHeader.aucFileName);
+    QDir dir(qStrFileFolderName);
 
-            if (!m_file.open(QIODevice::WriteOnly)) {
-                qDebug() << "Could not open file for writing.";
-                return false;
-            }
-            break;
-
-        case 2: // Data
-            if (packet->unSequenceNumber == m_expectedSeqNum) {
-                m_file.write(reinterpret_cast<char*>(packet->unDataGram.stData.aucBuffer), packet->unDataGram.stData.unSize);
-                m_expectedSeqNum++;
-                // Send acknowledgment
-                v_SendAcknowledgment(1, m_senderAddress, m_senderPort);
-            } else {
-                // Handle out-of-order or duplicate packets
-                qDebug() << "Out of order packet received.";
-                v_SendAcknowledgment(-1, m_senderAddress, m_senderPort);
-            }
-            break;
-
-        case 3: // Footer
-            m_file.close();
-            qDebug() << "File transfer complete: " << m_fileName;
-            break;
-
-        default:
-            qDebug() << "Unknown datagram type received.";
-            break;
+    // Check if the directory already exists and try to remove it recursively
+    if (dir.exists() && !dir.removeRecursively()) {
+        qDebug() << "Failed to delete existing directory and its contents." ;
+        return false;
     }
 
+    // Try to create the directory
+    if (!dir.mkpath(qStrFileFolderName)) {
+        qDebug() << "Failed to create directory for received file." ;
+        return false;
+    }
+
+    // Set up file for writing
+    m_qStrFileName = qStrFileName;
+    QFile qFile(m_qStrFilePath + "/" + m_qStrFileName);
+
+    if (!qFile.open(QIODevice::WriteOnly)) {
+        qDebug() << "Failed to open file for writing: " << m_qStrFileName;
+        return false;
+    }
+
+    qDebug() << "Receiving file: " << m_qStrFileName << ", Size: " << stReceiverData->unDataGram.stHeader.unFileLength;
     return true;
 }
 
-void FileReceiver::v_SendAcknowledgment(int ack, QHostAddress sender, quint16 senderPort) {
-    STDATAGRAM ackPacket;
-    ackPacket.unDataGramType = 4; // Acknowledgment
-    ackPacket.unDataGram.stAck.unAck = ack;
-
-    QByteArray ackData(reinterpret_cast<const char*>(&ackPacket), sizeof(STDATAGRAM));
-    m_socket->writeDatagram(ackData, sender, senderPort);
+/*--------------------------------------------------------------------
+ *	Purpose	: Receives file data and writes it to the output file.
+ *	Return  : None
+ --------------------------------------------------------------------- */
+bool ClientServerFileTransfer::b_RcvFileData(STDATAGRAM* stReceiverData) {
+    if (m_qFP.isOpen()) {
+        m_qFP.write(reinterpret_cast<const char*>(stReceiverData->unDataGram.stData.aucBuffer), stReceiverData->unDataGram.stData.unSize);
+        // Acknowledge receipt of the data
+        sendAcknowledgment(stReceiverData->unSequenceNumber);
+        return true;
+    } else {
+        qDebug() << "File is not open for writing.";
+        return false;
+    }
 }
-Key Modifications and Improvements
-Error Handling:
 
-Enhanced error messages and checks during file operations (e.g., opening files).
-Added acknowledgment mechanisms in both client and server to handle file transfer reliability.
-Improved Acknowledgment Logic:
+/*--------------------------------------------------------------------
+ *	Purpose	: Sends an acknowledgment for a received data chunk.
+ *	Return  : None
+ --------------------------------------------------------------------- */
+void ClientServerFileTransfer::sendAcknowledgment(UINT_32_TYPE sequenceNumber) {
+    // Create acknowledgment datagram
+    STDATAGRAM ackDatagram;
+    ackDatagram.unDataGramType = 4; // Acknowledgment type
+    ackDatagram.unSequenceNumber = sequenceNumber;
 
-Implemented acknowledgment handling with proper sequencing in the client and server to ensure the correct order of chunks.
-Code Readability:
+    QByteArray qBaBuffer(reinterpret_cast<const char*>(&ackDatagram), sizeof(STDATAGRAM));
+    m_qUDPSocket->writeDatagram(qBaBuffer, m_qsender, m_qunsenderPort); // Send back acknowledgment to sender
+}
 
-Improved code formatting and added comments for better readability and maintenance.
-Timeout Mechanism:
+/*--------------------------------------------------------------------
+ *	Purpose	: Receives a footer datagram and finalizes the file reception process.
+ *	Return  : None
+ --------------------------------------------------------------------- */
+bool ClientServerFileTransfer::b_RcvFileFooter(STDATAGRAM* stReceiverData) {
+    // Finalize file reception and close the file
+    if (m_qFP.isOpen()) {
+        m_qFP.close(); // Close the file after finishing
+        qDebug() << "File transfer completed. " << m_qStrFileName;
+        return true;
+    } else {
+        qDebug() << "File is not open for writing." ;
+        return false;
+    }
+}
 
-Added a timeout mechanism for waiting for acknowledgments on the client side.
-File Management:
-
-Ensured previous files are cleaned up and the server manages file names correctly.
-These modifications should help ensure the reliability and functionality of your UDP file transfer project. Make sure to test the code in your environment to validate its behavior. If you have any specific features you want to add or further modifications, let me know!
-
-
-
-
-
-
+/*--------------------------------------------------------------------
+ *	Purpose	: Waits for acknowledgment from the receiver.
+ *	Return  : true if acknowledgment is received, false otherwise.
+ --------------------------------------------------------------------- */
+bool ClientServerFileTransfer::b_WaitForAcknowledgment() {
+    // This function can be enhanced with a timeout mechanism
+    for (int i = 0; i < 10; ++i) {
+        if (m_qUDPSocket->hasPendingDatagrams()) {
+            QByteArray qBaBuffer;
+            qBaBuffer.resize(m_qUDPSocket->pendingDatagramSize());
+            m_qUDPSocket->readDatagram(qBaBuffer.data(), qBaBuffer.size(), &m_qsender, &m_qunsenderPort);
+            STDATAGRAM* stReceiverData = reinterpret_cast<STDATAGRAM*>(qBaBuffer.data());
+            if (stReceiverData->unDataGramType == 4) { // Acknowledgment type
+                qDebug() << "Acknowledgment received for sequence number:" << stReceiverData->unSequenceNumber;
+                return true; // Acknowledgment received
+            }
+        }
+        QThread::msleep(100); // Wait before retrying
+    }
+    return false; // Acknowledgment not received in the expected time
+}
