@@ -1,0 +1,198 @@
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+
+    // Initialize Ethernet for TPC
+    m_pObjTxEthTpc = new CEthernet(2);
+    m_pObjTxEthTpc->Config_Tx_Sckt(TPC_PORT, TPC_DP_IP);
+    m_pTxEthThreadobjTpc = new QThread();
+    m_pObjTxEthTpc->moveToThread(m_pTxEthThreadobjTpc);
+    connect(m_pTxEthThreadobjTpc, &QThread::started, m_pObjTxEthTpc, &CEthernet::setupCommunication);
+    m_pTxEthThreadobjTpc->start();
+
+    // Initialize Ethernet for XBR
+    m_pObjTxEthXbr = new CEthernet(2);
+    m_pObjTxEthXbr->Config_Tx_Sckt(XBR_PORT, XBTR_DP_IP);
+    m_pTxEthThreadobjXbr = new QThread();
+    m_pObjTxEthXbr->moveToThread(m_pTxEthThreadobjXbr);
+    connect(m_pTxEthThreadobjXbr, &QThread::started, m_pObjTxEthXbr, &CEthernet::setupCommunication);
+    m_pTxEthThreadobjXbr->start();
+
+    // Initialize timer
+    m_pqTimer = new QTimer(this);
+    m_pqTimer->setInterval(20); // Set interval to 20ms
+    connect(m_pqTimer, &QTimer::timeout, this, &MainWindow::updateTimeDuration);
+}
+
+MainWindow::~MainWindow()
+{
+    delete m_pObjTxEthTpc;
+    delete m_pObjTxEthXbr;
+    pObjBinFile->CloseFile();
+    delete ui;
+}
+
+void MainWindow::on_qPb_Start_Stop_clicked()
+{
+    QByteArray qbFilePathLatin;
+    QString qStrTempStartStop = ui->qPb_Start_Stop->text();
+    QByteArray qbTempStrStartStop = qStrTempStartStop.toLatin1();
+
+    pObjBinFile = new CFileReadWrite();
+    m_pThreadobjFile = new QThread();
+    pObjBinFile->moveToThread(m_pThreadobjFile);
+    m_pThreadobjFile->start();
+
+    if (strcmp(qbTempStrStartStop.data(), "START") == 0)
+    {
+        QString qStrPath = QDir::toNativeSeparators(
+            QFileDialog::getOpenFileName(this, tr("Select File"), QDir::currentPath()));
+        qbFilePathLatin = qStrPath.toLatin1();
+
+        if (!qStrPath.isEmpty())
+        {
+            if (pObjBinFile->OpenFile((UINT_8_TYPE *)qbFilePathLatin.data(), BINARY_MODE, READ_DATA) == 1)
+            {
+                ui->qPb_Start_Stop->setText("STOP");
+                ui->qRb_Tpc_Xbtr->setDisabled(true);
+                ui->qRbXbtr_Tpc->setDisabled(true);
+                m_pqTimer->start(20);
+            }
+            else
+            {
+                qDebug() << "Error in Opening file" << endl;
+            }
+        }
+        else
+        {
+            qDebug() << "Error in Selection of file" << endl;
+        }
+    }
+    else if (strcmp(qbTempStrStartStop.data(), "STOP") == 0)
+    {
+        ui->qPb_Start_Stop->setText("START");
+        ui->qRb_Tpc_Xbtr->setEnabled(true);
+        ui->qRbXbtr_Tpc->setEnabled(true);
+        previous_counter = -1;
+        m_pqTimer->stop();
+    }
+}
+
+ST_RDP_STATUS MainWindow::getUniqueSensorCommand()
+{
+    ST_RDP_STATUS stTempData;
+
+    while (!pObjBinFile->CheckEOF())
+    {
+        pObjBinFile->ReadStructureFromFile((UINT_8_TYPE *)&stTempData, sizeof(ST_RDP_STATUS));
+        uint32_t currentCounter = GEF_SWAP32(stTempData.stSensorCmds.StXbrTactData2.unCounter);
+
+        if (previous_counter == -1 || currentCounter > previous_counter)
+        {
+            qDebug() << "Cnt:" << currentCounter;
+            previous_counter = currentCounter;
+            return stTempData;
+        }
+    }
+
+    if (pObjBinFile->CheckEOF())
+    {
+        m_pqTimer->stop();
+        if (!isEOF)
+        {
+            isEOF = true;
+            qDebug() << "EOF reached. No more data will be sent.";
+        }
+    }
+
+    return ST_RDP_STATUS{};
+}
+
+ST_RDP_STATUS MainWindow::getUniquestSensorStatus()
+{
+    ST_RDP_STATUS stTempData;
+
+    while (!pObjBinFile->CheckEOF())
+    {
+        pObjBinFile->ReadStructureFromFile((UINT_8_TYPE *)&stTempData, sizeof(ST_RDP_STATUS));
+        uint32_t currentCounter = GEF_SWAP32(stTempData.stSensorStatus.unCounter);
+
+        if (previous_counter == -1 || currentCounter > previous_counter)
+        {
+            qDebug() << "Cnt:" << currentCounter;
+            previous_counter = currentCounter;
+            return stTempData;
+        }
+    }
+
+    if (pObjBinFile->CheckEOF())
+    {
+        m_pqTimer->stop();
+        if (!isEOF)
+        {
+            isEOF = true;
+            qDebug() << "EOF reached. No more data will be sent.";
+        }
+    }
+
+    return ST_RDP_STATUS{};
+}
+
+void MainWindow::updateTimeDuration()
+{
+    ST_RDP_STATUS stTempData;
+    qint32 qnResult = 0;
+    qDebug() << "updateTimeDuration";
+
+    if (ui->qRb_Tpc_Xbtr->isChecked())
+    {
+        qDebug() << "Tpc_Xbtr";
+        stTempData = getUniqueSensorCommand();
+        if (!isEOF)
+        {
+            qnResult = m_pObjTxEthXbr->Send_data((UINT_8_TYPE *)&stTempData.stSensorCmds, sizeof(stTempData.stSensorCmds));
+            qDebug() << "sent:" << GEF_SWAP32(stTempData.stSensorCmds.StXbrTactData2.unCounter);
+
+            if (qnResult <= 0)
+            {
+                qDebug() << "Send error" << endl;
+            }
+        }
+    }
+    else if (ui->qRbXbtr_Tpc->isChecked())
+    {
+        qDebug() << "Xbtr_TPC";
+        stTempData = getUniquestSensorStatus();
+        if (!isEOF)
+        {
+            qnResult = m_pObjTxEthXbr->Send_data((UINT_8_TYPE *)&stTempData.stSensorStatus, sizeof(stTempData.stSensorStatus));
+            qDebug() << "sent:" << GEF_SWAP32(stTempData.stSensorStatus.unCounter);
+
+            if (qnResult <= 0)
+            {
+                qDebug() << "Send error" << endl;
+            }
+        }
+    }
+}
+
+void MainWindow::on_qRb_Tpc_Xbtr_clicked()
+{
+    ui->qPb_Start_Stop->setEnabled(true);
+    qDebug() << "Tpc_Xbtr";
+    previous_counter = -1;
+    isEOF = false;
+}
+
+void MainWindow::on_qRbXbtr_Tpc_clicked()
+{
+    ui->qPb_Start_Stop->setEnabled(true);
+    qDebug() << "Xbtr_Tpc";
+    previous_counter = -1;
+    isEOF = false;
+}
